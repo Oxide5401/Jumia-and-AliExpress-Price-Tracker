@@ -400,6 +400,33 @@ test('background price change updates and highlights the open dashboard', async 
     assert(betaFlag && /12\.5%/.test(betaFlag.textContent), 'beta badge shows the new movement');
 });
 
+// ── 9. Returning to a hidden tab re-reads history for an open dashboard ──
+test('returning to the tab refreshes the dashboard after another tab changed a price', async () => {
+    const key = 'p1';
+    const url = 'https://www.jumia.com.gh/p1.html';
+    const history = {
+        [key]: { name: 'One', url, site: 'jumia', currency: 'GHS', samples: [{ p: 100, t: realNow - 3 * HOUR }], created: realNow - 9 * DAY },
+    };
+    const storage = { ...seedHistory(history), jumia_gh_coupons_last_fetch: realNow };
+    const env = await makeEnv({ storage });
+    await openDashboard(env);
+
+    assert(!env.win.document.querySelector('.jtm-flag'), 'no badge before the change');
+
+    // Simulate another tab (or a smart-watch check) writing a new sample.
+    const h = loadJSON(env, HISTORY_KEY);
+    h[key].samples.push({ p: 88, t: env.clock.now, src: 'watch' });
+    env.store.set(HISTORY_KEY, JSON.stringify(h));
+
+    env.win.document.dispatchEvent(new env.win.Event('visibilitychange'));
+    await flush();
+
+    const row = env.win.document.querySelector('.jtm-row.changed');
+    assert(row, 'row flagged as changed');
+    assert(row.querySelector('.jtm-flag.down'), 'drop badge rendered');
+    assert(/88/.test(row.querySelector('.jtm-cur').textContent), 'current price re-read');
+});
+
 (async () => {
     let failed = 0;
     for (const t of tests) {

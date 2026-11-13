@@ -138,7 +138,7 @@ These are the assertions worth keeping when changing extraction, storage, or UI.
 - **AliExpress:** with `fetchAliExpress: false`, AliExpress products produce zero background requests and the status line explains "visit-only".
 - **Visit sync:** loading a product page with the watch off still refreshes that product's `lastCheck`/`nextCheck` in `jumia_gh_smart_watch_state`.
 - **Merge:** importing a product that lacks a target but whose export includes one stores the target.
-- **Open dashboard refresh:** a change found by a background tick re-renders an open dashboard in place, moves the product to the top under **Recent**, adds the change badge, and preserves the current search text, sort choice, and scroll position.
+- **Open dashboard refresh:** a change found by a background tick re-renders an open dashboard in place, moves the product to the top under **Recent**, adds the change badge, and preserves the current search text, sort choice, and scroll position. Dispatching `visibilitychange` after another tab writes a new sample produces the same refresh.
 - **Politeness:** no more than one request is in flight, `minGapMs` is respected, and 403/429 responses set `hosts[host].blockedUntil`.
 
 ---

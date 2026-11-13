@@ -57,7 +57,7 @@ A single Tampermonkey/Violentmonkey userscript that tracks product prices on **J
 - **Fetch images** button backfills images for products tracked by older versions.
 
 ### Price-change highlighting (new in 3.6.0)
-- When a background check or a page visit detects a new price, an **open dashboard updates itself** without losing your search text, sort choice, or scroll position.
+- When a background check or a page visit detects a new price, an **open dashboard updates itself** without losing your search text, sort choice, or scroll position. Returning to a tab also re-reads history, so changes recorded by another tab appear immediately.
 - Changed products show a `↓` / `↑` badge with the size of the move and rise to the top under the default **Recent** sort.
 - Recently changed rows get a subtle green (drop) or orange (rise) tint for **7 days**.
 - A **Recent changes** sort orders every product by the time of its last real movement, so changes stay findable even after later unchanged checks.

@@ -1229,7 +1229,10 @@
 
     function initSmartWatch() {
         document.addEventListener('visibilitychange', () => {
-            if (swEnabled() && document.visibilityState === 'visible') scheduleWatchTick(8000);
+            if (document.visibilityState !== 'visible') return;
+            // Another tab may have recorded changes while this one was hidden.
+            refreshDashboardIfOpen();
+            if (swEnabled()) scheduleWatchTick(8000);
         });
         window.addEventListener('online', () => {
             if (swEnabled()) scheduleWatchTick(8000);

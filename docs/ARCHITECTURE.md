@@ -302,7 +302,7 @@ Web sync honours `CONFIG.couponCacheTTLMs` (6 hours) unless forced by **Find Cou
 - Modal with a fixed backdrop, smart-watch bar, toolbar, list, import overlay, and footer actions.
 - The smart-watch bar contains the enable checkbox, live status text, and **Check now**. `renderWatchStatus` only reads/updates this bar, so it is safe to call after any list render.
 - Rows are generated from history; sorting/filtering happens in memory and re-renders the list only.
-- `renderTrackedModal(preserve)` reads `.jtm-search`, `.jtm-sort`, and `.jtm-body.scrollTop` before replacing the body, then restores them. `refreshDashboardIfOpen()` calls it with `preserve = true` when a price change lands, so an open dashboard updates without losing the user's view.
+- `renderTrackedModal(preserve)` reads `.jtm-search`, `.jtm-sort`, and `.jtm-body.scrollTop` before replacing the body, then restores them. `refreshDashboardIfOpen()` calls it with `preserve = true` when a price change lands, so an open dashboard updates without losing the user's view. The same call runs on `visibilitychange` when a tab becomes visible, which covers a change recorded by another tab.
 - `latestChange(product)` walks samples backwards to find the most recent pair of differing prices. This is deliberately not "compare the last two samples": the daily `src: 'watch'` baseline can append an unchanged point after a real movement.
 - Per-row markup uses five deliberate patterns:
   - **Name:** `<span class="jtm-name-text">` for text + absolutely positioned `<a class="jtm-name-link">` overlay. This survives CSS that hides anchor text.

@@ -5,7 +5,7 @@ All notable changes to this project are documented here. The format follows [Kee
 ## [3.6.0] — 2026-11-13
 
 ### Added
-- **Changed products surface in the dashboard.** When a smart-watch check or a normal page visit records a different price, an already-open dashboard re-renders in place instead of waiting for you to close and reopen it.
+- **Changed products surface in the dashboard.** When a smart-watch check or a normal page visit records a different price, an already-open dashboard re-renders in place instead of waiting for you to close and reopen it. Returning to a tab also re-reads history, so a dashboard picks up changes recorded elsewhere.
 - **Change badge.** Rows that moved within the last 7 days show a `↓` / `↑` badge with the percentage move; the tooltip shows the previous and new price.
 - **Row tint.** Recent drops get a soft green tint and recent rises a soft orange tint, so movement is visible even while scrolling.
 - **Recent changes sort.** A new dashboard sort orders products by the time of their last real movement, independent of later unchanged baseline samples.
