@@ -36,6 +36,7 @@ Use jsdom to run the real userscript against synthetic pages, with the GM APIs s
 
 ```bash
 npm install jsdom
+node tests/smartwatch.test.cjs
 ```
 
 ```js

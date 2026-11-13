@@ -392,6 +392,8 @@ Check the version shown in your userscript manager. Some managers require a manu
 ├── docs/
 │   ├── ARCHITECTURE.md                       # module map, data flow, extension points
 │   └── TESTING.md                            # manual + automated test checklist
+├── tests/
+│   └── smartwatch.test.cjs                   # jsdom regression tests for the scheduler
 ├── LICENSE                                   # MIT
 └── .gitignore
 ```
@@ -421,7 +423,14 @@ The script is an IIFE with no exports, so tests load it into a DOM and stub the 
 - `GM_xmlhttpRequest` returning canned HTML.
 - `GM_notification`, `alert`, and `confirm` stubs.
 
-Use jsdom (`npm install jsdom`) to verify extraction, storage, merge behaviour, panel/dashboard rendering, image handling, and smart-watch scheduling. Smart-watch tests should cover: `304` handling, the daily budget cap, canary campaign detection, target prioritisation, AliExpress skipping, visit-side metadata updates, and target merging. A headless Chromium screenshot is useful for layout checks:
+Use jsdom (`npm install jsdom`) to verify extraction, storage, merge behaviour, panel/dashboard rendering, image handling, and smart-watch scheduling. The scheduler regression suite is committed:
+
+```bash
+npm install jsdom
+node tests/smartwatch.test.cjs
+```
+
+Smart-watch tests should cover: `304` handling, the daily budget cap, canary campaign detection, target prioritisation, AliExpress skipping, visit-side metadata updates, and target merging. A headless Chromium screenshot is useful for layout checks:
 
 ```bash
 msedge --headless=new --disable-gpu --hide-scrollbars \

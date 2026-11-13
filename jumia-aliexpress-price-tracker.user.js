@@ -108,7 +108,7 @@
             minGapMs: 8000,               // minimum spacing between checks
             tickMs: 5 * 60 * 1000,        // scheduler wake-up interval
             jitter: 0.2,                  // ±20% on every interval
-            canaryCount: 3,               // signal products per site
+            canaryCount: 3,               // signal products overall (Jumia-eligible)
             canaryIntervalMs: 6 * 60 * 60 * 1000,
             campaignThreshold: 2,         // canaries changed => campaign
             campaignWindowMs: 6 * 60 * 60 * 1000,
@@ -515,9 +515,9 @@
             if (t.indexOf('formatedPrice') === -1 && t.indexOf('formatedActivityPrice') === -1) continue;
 
             const act = t.match(/"formatedActivityPrice"\s*:\s*"([^"]+)"/);
-            const base = t.match(/"formatedPrice"\s*:\s*"([^"]+)"/);
+            const baseMatch = t.match(/"formatedPrice"\s*:\s*"([^"]+)"/);
             const orig = t.match(/"formatedOriginalPrice"\s*:\s*"([^"]+)"/);
-            const raw = (act && act[1]) || (base && base[1]);
+            const raw = (act && act[1]) || (baseMatch && baseMatch[1]);
             if (!raw) continue;
 
             const price = parsePrice(raw);
