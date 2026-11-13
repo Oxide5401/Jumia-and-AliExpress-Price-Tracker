@@ -18,10 +18,23 @@ page load (document-end)
         ├─ renderCoupons()
         ├─ refreshCouponsFromWeb()      background, 6h TTL
         ├─ watchSpaNavigation()         AliExpress in-page URL changes
+        ├─ initSmartWatch()             opt-in scheduler (visibility/online hooks)
         │
         └─ if product page:
              trackCurrentPage()
                 └─ extract → recordPrice() → updatePanel() → notifyDrop()
+                                           └─ noteLivePrice() → scheduler metadata
+```
+
+A background smart-watch tick follows the same extraction path with fetched HTML:
+
+```
+timer → smartWatchTick()
+          ├─ budget + lease + visibility checks
+          ├─ dueCandidates() / chooseWatchCandidate()
+          ├─ fetchWatchPage()  (conditional GET)
+          ├─ DOMParser → extractPrice(doc, url)
+          └─ applyWatchedPrice() → notifyDrop() → reschedule
 ```
 
 Coupons are handled on every page. Product tracking only runs on pages that match the site's product-page pattern.
@@ -30,17 +43,18 @@ Coupons are handled on every page. Product tracking only runs on pages that matc
 
 ## 2. Module map
 
-The file is divided into nine commented sections:
+The file is divided into nine commented sections, plus the smart-watch module inserted as **4b**:
 
 | Section | Responsibility | Key functions |
 | --- | --- | --- |
 | 1 | Site detection + config | `SITES`, `SITE`, `IS_ALI`, `CONFIG` |
-| 2 | Utilities | `parsePrice`, `detectCurrency`, `formatMoney`, `formatPrice`, `getProductKey`, `escapeHtml`, `truncate`, `displayName`, `setThumb`, `timeAgo`, `copyToClipboard` |
+| 2 | Utilities | `parsePrice`, `detectCurrency`, `formatMoney`, `formatPrice`, `getProductKey`, `escapeHtml`, `truncate`, `cleanProductName`, `shortDuration`, `displayName`, `setThumb`, `timeAgo`, `copyToClipboard` |
 | 3 | Price + image extraction | `cleanUrl`, `absoluteImage`, `productNodesOf`, `imageFromDoc`, `extractImage`, `extractFromJsonLd`, `extractFromDomJumia`, `extractFromDomAliExpress`, `extractFromAliExpressState`, `extractFromMeta`, `extractPrice` |
 | 4 | Price storage | `loadHistory`, `saveHistory`, `mergeHistoryData`, `recordPrice` |
+| **4b** | **Smart watch scheduler** | `loadWatchState`, `selectCanaries`, `watchNextDelay`, `noteLivePrice`, `smartWatchTick`, `checkWatchedProduct`, `applyWatchedPrice`, `initSmartWatch`, `renderWatchStatus` |
 | 5 | Coupons | validation sets, `extractCouponsFromDom`, `mergeCoupons`, `loadCoupons`, `saveCoupons`, `purgeInvalidCoupons`, `fetchHtml`, `refreshCouponsFromWeb`, `scanCurrentPageForCoupons`, `rankCoupons` |
 | 6 | Main panel | `createPanel`, `updateTrackedBadge`, `updatePanel`, `renderCoupons` |
-| 7 | Tracked-products dashboard | `backfillImages`, `openTrackedModal`, `renderTrackedModal` |
+| 7 | Tracked-products dashboard | `backfillImages`, `editTarget`, `openTrackedModal`, `renderTrackedModal` |
 | 8 | Notifications | `notify`, `notifyDrop` |
 | 9 | Main / bootstrap | `isProductPage`, `trackCurrentPage`, `watchSpaNavigation`, `init` |
 
@@ -102,12 +116,14 @@ Keys are the primary keys of the history object and are visible in Export JSON. 
 
 ## 5. Price extraction
 
-`extractPrice()` returns:
+`extractPrice(doc = document, base = location.href)` returns:
 
 ```js
 { price: number, currency?: string, oldPrice?: number|null,
   name?: string, availability?: string, source: 'dom'|'json-ld'|'state'|'meta' }
 ```
+
+Every extractor accepts an explicit `doc` and base URL. The live page uses the defaults; background checks pass a `DOMParser` document and the tracked URL. This is why the extractors must not reach for global `document` or `location` internally.
 
 ### Jumia order
 1. `extractFromDomJumia()` — `.prc` and related selectors.
@@ -138,7 +154,7 @@ Keys are the primary keys of the history object and are visible in Export JSON. 
 ```js
 history = {
   [productKey]: {
-    name, url, site, currency, image?, created,
+    name, url, site, currency, image?, target?, created,
     samples: [{ p, op?, t, src }],
   }
 }
@@ -149,6 +165,7 @@ history = {
 - `recordPrice` trims each product to the last 120 samples (`maxSamplesPerProduct`).
 - Names are cleaned of zero-width characters and only overwrite an existing name when non-empty.
 - `image` is only overwritten when a new image URL is found, so a failed extraction cannot erase a good one.
+- `target` is user-set through the dashboard; it is never derived from a sample and is preserved by merge/import.
 
 ### Merge semantics
 `mergeHistoryData(incoming)`:
@@ -156,6 +173,7 @@ history = {
 - Adds unknown product keys verbatim.
 - For known keys, appends samples whose `t` is not already present, re-sorts, and re-trims.
 - Fills missing `name`, `url`, `currency`, `site`, `image`; keeps the earliest `created`.
+- Fills a missing `target` from the import.
 - Ignores products without a non-empty `samples` array.
 - Never deletes existing data.
 
@@ -192,6 +210,66 @@ AliExpress frequently serves a challenge page to these requests; failures are ex
 
 ---
 
+## 7b. Smart watch scheduler
+
+Opt-in (`CONFIG.smartWatchKey`, default `false`). It exists to reduce requests, not to crawl faster: without a batch API, learning N prices costs N page reads, so the scheduler spends its budget on products most likely to have moved.
+
+### State
+
+```js
+state = {
+  products: {
+    [key]: { lastCheck, nextCheck, misses, failures,
+             etag, lastModified, lastPrice, rechecksLeft }
+  },
+  hosts:    { jumia|aliexpress: { failures, blockedUntil } },
+  canaries: { [key]: changedAt },
+  budget:   { day, used },
+  campaignUntil, campaignSince, lastRequestAt,
+  lease: { id, until } | null,
+}
+```
+
+Persisted as JSON under `CONFIG.watchStateKey` (`jumia_gh_smart_watch_state`). Product entries are pruned when their history entry disappears.
+
+### Candidate selection
+
+1. Skip the current product, AliExpress (when `fetchAliExpress` is false), products on a blocked host, and entries without an `http(s)` URL.
+2. A product is due when `nextCheck <= now`; canaries are additionally due every `canaryIntervalMs`.
+3. During a campaign, products not yet checked since `campaignSince` become due.
+4. Priority: canary (3) → campaign / near-target / pending recheck (2) → stale (1).
+5. `chooseWatchCandidate` takes a due canary first; otherwise during a campaign the earliest due entry; otherwise only priority ≥ 2 or stale products. This is what prevents a queue of quiet products from trickling out one request at a time.
+
+### Intervals (`watchNextDelay`)
+
+- Changed price → recheck after 1h, 6h, 24h (`rechecksLeft` 2 → 0).
+- Otherwise, 30-day volatility: ≥3 changes → 6h, 2 → 12h, 1 → 48h, 0 → 7d.
+- Consecutive unchanged checks double the base (capped at 4×).
+- Canaries are capped at 6h; near-target products at 24h; products at target at `maxIntervalMs`.
+- Everything is clamped to 6h…14d and multiplied by ±20% jitter.
+
+Two or more canary changes within `campaignWindowMs` set `campaignUntil = now + 12h`, enabling a slow sweep.
+
+### Requests
+
+`fetchWatchPage` uses `GM_xmlhttpRequest` with `If-None-Match` / `If-Modified-Since` when known. A `304` updates scheduling metadata only — no sample, no parse. Other responses are parsed with `DOMParser` and fed to the same extractors as live pages.
+
+Limits enforced in `smartWatchTick`:
+
+- `maxChecksPerDay` (40) hard cap, reset by local calendar day.
+- `minGapMs` (8s) between checks.
+- One in-flight check (`watchBusy`) and a cross-tab lease (`leaseMs`, 90s).
+- Tab must be visible; `navigator.onLine !== false`; `saveData` disables it.
+- 403/429/5xx → host backoff (honouring `Retry-After`), exponential up to 24h.
+
+### Samples and notifications
+
+`applyWatchedPrice` appends a sample when the price changed or the newest sample is ≥ 24h old (keeping quiet products from bloating storage). New samples use `src: 'watch'`. Drops go through the same `notifyDrop` path; crossing a target fires a separate notification.
+
+`noteLivePrice` runs on every normal product visit, even when the watch is off, so manual browsing keeps `lastCheck` / `nextCheck` coherent. It only writes when the watch is enabled or the product already has scheduler state.
+
+---
+
 ## 8. Coupons
 
 Extraction is deliberately conservative:
@@ -218,12 +296,14 @@ Web sync honours `CONFIG.couponCacheTTLMs` (6 hours) unless forced by **Find Cou
 - Buttons wire directly to `recordPrice`, `refreshCouponsFromWeb`, storage clears, and the dashboard.
 
 ### Dashboard (`openTrackedModal` / `renderTrackedModal`)
-- Modal with a fixed backdrop, toolbar, list, import overlay, and footer actions.
+- Modal with a fixed backdrop, smart-watch bar, toolbar, list, import overlay, and footer actions.
+- The smart-watch bar contains the enable checkbox, live status text, and **Check now**. `renderWatchStatus` only reads/updates this bar, so it is safe to call after any list render.
 - Rows are generated from history; sorting/filtering happens in memory and re-renders the list only.
-- Per-row markup uses three deliberate patterns:
+- Per-row markup uses four deliberate patterns:
   - **Name:** `<span class="jtm-name-text">` for text + absolutely positioned `<a class="jtm-name-link">` overlay. This survives CSS that hides anchor text.
   - **Thumbnail:** `<span class="jtm-thumb">` containing an `<img>` or the 🛍 placeholder.
   - **Tag:** `<span class="jtm-tag">` with an `.ali` modifier for AliExpress.
+  - **Target:** `<button class="jtm-target">`; shows `🎯 set` when unset, the formatted target when set, and a green `.met` state when the current price is at/below it. Clicking calls `editTarget`.
 - A capture-phase `error` listener on the modal swaps broken images for the placeholder (image `error` events do not bubble).
 - Footer actions: Export, Import (merge), Fetch images, Clear All.
 
@@ -234,7 +314,9 @@ All page/history-derived strings pass through `escapeHtml` before interpolation 
 
 ## 10. Notifications
 
-`notifyDrop(result)` compares the new sample to the previous one. At or above `CONFIG.dropThresholdPercent` (5%), it notifies via `GM_notification` or the Web Notifications API. Notification failures are non-fatal.
+`notifyDrop(result)` compares the new sample to the previous one. At or above `CONFIG.dropThresholdPercent` (5%), it notifies via `GM_notification` or the Web Notifications API. It accepts `siteLabel` so background checks can name the correct site. Notification failures are non-fatal.
+
+The smart watch additionally notifies once when a price crosses below its stored `target` (previous sample above target, new sample at/below).
 
 ---
 
@@ -247,6 +329,8 @@ All page/history-derived strings pass through `escapeHtml` before interpolation 
 - **Explicit colours.** Form controls and UI text need explicit `color`/`background` so dark-mode extensions and UA dark schemes cannot erase them.
 - **Never destroy data silently.** Merge instead of replace; only overwrite a field when the new value is valid.
 - **Escape before injecting.** Every interpolated value is treated as untrusted.
+- **Politeness is a feature.** Background checks must stay opt-in, visible in the UI, budget-capped, spaced, and conditional. Do not remove the budget/lease/backoff guards to make checks "faster".
+- **Background extraction must use the passed `doc`/`base`.** Never read the live `document` inside an extractor.
 
 ---
 
@@ -261,6 +345,9 @@ All page/history-derived strings pass through `escapeHtml` before interpolation 
 | Add a stored field | `recordPrice`, `mergeHistoryData`, row/panel renderers, Export docs |
 | Change retention | `CONFIG.maxSamplesPerProduct`, `CONFIG.maxProducts` |
 | Change notification policy | `CONFIG.dropThresholdPercent`, `notifyDrop` |
+| Change smart-watch aggressiveness | `CONFIG.watch` (`maxChecksPerDay`, `tickMs`, `minGapMs`, intervals) |
+| Change scheduling policy | `selectCanaries`, `watchNextDelay`, `dueCandidates`, `chooseWatchCandidate` |
+| Add a request type | `fetchWatchPage` + a host entry in `CONFIG.watch` |
 | Add import formats | `mergeHistoryData` |
 
 After any change: run `node --check`, exercise the affected flow with stubbed GM APIs, and update `CHANGELOG.md`.

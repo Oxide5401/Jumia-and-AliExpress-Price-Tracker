@@ -2,6 +2,25 @@
 
 All notable changes to this project are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions use `MAJOR.MINOR.PATCH`.
 
+## [3.5.0] — 2026-11-13
+
+### Added
+- **Smart watch (opt-in, default off).** Budgeted background price checks while a Jumia/AliExpress tab is visible. No server and no headless crawler; nothing runs when every tab is closed.
+- Canary-gated scheduling: up to three recently volatile background-eligible products act as signals. Two canary changes within six hours trigger a slow campaign sweep of the rest.
+- Adaptive per-product intervals based on 30-day volatility, recent changes, and consecutive unchanged checks, with ±20% jitter and a 14-day staleness ceiling.
+- **Target prices.** A 🎯 button on each dashboard row sets a target. Products within 10% of target are checked daily; products at/below target are effectively retired. Reaching a target fires a notification.
+- Conditional GET with stored `ETag` / `Last-Modified`; `304 Not Modified` confirms an unchanged price without parsing or appending a sample.
+- Hard limits: 40 checks/day, 8-second minimum gap, one request in flight, and per-host exponential backoff on 403/429/5xx (honouring `Retry-After`).
+- Dashboard smart-watch bar with an enable checkbox, live status (`12/40 checks today · 3 canaries · next in 2h`), and **Check now**.
+- Cross-tab lease so two open tabs do not double-check, and automatic pausing when the tab is hidden, offline, or `saveData` is enabled.
+- Refactored extraction helpers to accept an explicit `Document` and base URL, so background checks can parse fetched HTML without touching the live page.
+
+### Changed
+- Normal page visits now update scheduler metadata (`noteLivePrice`), even when the watch is off. This keeps the first background check well informed.
+- Background samples are stored as `src: "watch"` and are only recorded when the price changes or the newest sample is at least 24 hours old, keeping history small.
+- `mergeHistoryData` now also preserves an imported `target` price.
+- AliExpress remains visit-captured: background fetches are disabled because AliExpress serves challenge pages to scripted requests.
+
 ## [3.4.0] — 2026-11-12
 
 ### Added

@@ -2,7 +2,7 @@
 
 A single Tampermonkey/Violentmonkey userscript that tracks product prices on **Jumia Ghana** (`jumia.com.gh`) and **AliExpress** (Ghana shipping, GHS), finds and stores coupon codes, and shows everything in one dashboard — including **product thumbnails**.
 
-![Version](https://img.shields.io/badge/version-3.4.0-orange)
+![Version](https://img.shields.io/badge/version-3.5.0-orange)
 ![License](https://img.shields.io/badge/license-MIT-blue)
 ![Platform](https://img.shields.io/badge/platform-Tampermonkey%20%7C%20Violentmonkey-2ea44f)
 
@@ -24,6 +24,7 @@ A single Tampermonkey/Violentmonkey userscript that tracks product prices on **J
   - [Coupons](#coupons)
   - [The tracked-products dashboard](#the-tracked-products-dashboard)
   - [Product images](#product-images)
+  - [Smart watch (optional background checks)](#smart-watch-optional-background-checks)
   - [Notifications](#notifications)
 - [How prices are extracted](#how-prices-are-extracted)
 - [Data storage & privacy](#data-storage--privacy)
@@ -54,6 +55,16 @@ A single Tampermonkey/Violentmonkey userscript that tracks product prices on **J
 - Stores the image URL with the product, so thumbnails appear in the panel and dashboard.
 - Graceful 🛍 placeholder when an image is missing, blocked, or fails to load.
 - **Fetch images** button backfills images for products tracked by older versions.
+
+### Smart watch (new in 3.5.0, off by default)
+- Optional background price checks while a Jumia or AliExpress tab is open — no server, no always-on background page.
+- **Canary-gated:** a few volatile products act as signals; the rest are checked only when there is evidence a price may have moved.
+- **Adaptive scheduling:** change frequency, misses, and recency decide each product's next check.
+- **Target prices:** products near their target are checked more often; products already at target are left alone.
+- **Budgeted:** at most 40 checks per day, at least 8 seconds apart, with per-host backoff on 403/429/5xx.
+- **Cheap checks:** conditional GET (`If-None-Match` / `If-Modified-Since`) means an unchanged page costs a `304` with no body parsing or new sample.
+- **Jumia only for background work.** AliExpress still captures on visit because it serves challenge pages to scripted fetches.
+- Shows its request budget and next check in the dashboard, so you can confirm it is behaving.
 
 ### Coupons
 - Scans the current page plus site coupon pages for codes.
@@ -163,7 +174,8 @@ Open it with the 📊 button in the panel.
 
 - **Filter by name** — case-insensitive substring match; blank stored names still match their fallback label.
 - **Sort** — Recent (last sample), Biggest drop, Biggest rise, Lowest price, Highest price, Name.
-- **Rows** — site tag, thumbnail, name (tooltip shows the full stored name), current, low, high, change, delete.
+- **Rows** — site tag, thumbnail, name (tooltip shows the full stored name), target, current, low, high, change, delete.
+- **Smart watch bar** — enable/disable background checks, see today's budget and next check, or run one check immediately.
 - **Export JSON** — copies the full history to the clipboard as pretty-printed JSON.
 - **Import JSON** — paste an export; **Merge** adds new products/samples and fills missing fields without deleting anything.
 - **Fetch images** — see below.
@@ -186,6 +198,37 @@ A thumbnail shows 🛍 when:
 - the product has no stored image yet,
 - the image URL fails to load, or
 - the image was rejected as site chrome (logos, sprites, spacers, tracking pixels).
+
+### Smart watch (optional background checks)
+
+The smart watch keeps prices fresh between visits without polling every product on a timer. It is **off by default** and only runs while a Jumia or AliExpress tab is open and visible.
+
+To enable it:
+
+1. Open the dashboard.
+2. Tick **Smart watch** in the bar under the header.
+3. Leave a tab open when you want checks to happen. Closing every tab pauses the watch; nothing runs in the background without a page.
+
+The status line tells you what it is doing, for example:
+
+```
+12/40 checks today · 3 canaries · next in 2h · campaign sweep
+```
+
+What it does:
+
+- **Canaries** — up to three background-eligible products with the most recent price changes act as signals. They are checked first.
+- **Campaign detection** — when two or more canaries change within six hours, a site-wide sale is likely. The watch schedules a slow sweep instead of hammering every product at once.
+- **Adaptive intervals** — recently changed products are rechecked after 1h, 6h, then 24h. Quiet products back off up to 14 days. Every interval gets ±20% jitter so requests do not bunch up.
+- **Target prices** — click the 🎯 button on a row to set a target. Products within 10% of their target are checked daily; products already at or below target are effectively retired from checking. A notification fires when a target is reached.
+- **Conditional requests** — stored `ETag` / `Last-Modified` validators are sent back. A `304 Not Modified` confirms the price is unchanged without downloading or parsing the page.
+- **Hard budget** — 40 checks per day across both sites, at least 8 seconds apart, one check in flight at a time. 403/429/5xx responses pause that host with exponential backoff.
+
+**AliExpress** is intentionally excluded from background fetches because it returns bot-challenge pages to scripted requests. AliExpress prices continue to update whenever you visit an item page.
+
+Expected cost for a typical 90-product list: roughly **10–40 requests per day**, mostly cheap `304`s, instead of hundreds. **Check now** runs one immediate check but still counts against the daily budget.
+
+The watch stores no data anywhere except your userscript manager's storage. It does not call any service besides the product pages themselves.
 
 ### Notifications
 
@@ -229,6 +272,8 @@ All data stays in your browser, inside your userscript manager's storage. There 
 | `aliexpress_coupons_last_fetch` | AliExpress | Last coupon sync timestamp (ms). |
 | `jumia_gh_coupons_show_all` | Jumia | Whether the coupon list shows all codes. |
 | `aliexpress_coupons_show_all` | AliExpress | Whether the coupon list shows all codes. |
+| `jumia_gh_smart_watch` | both sites | Whether the opt-in smart watch is enabled (`true`/`false`). |
+| `jumia_gh_smart_watch_state` | both sites | Scheduler state: per-product due dates, validators, canary signals, budget, host backoff (JSON). |
 
 ### History schema
 
@@ -240,6 +285,7 @@ All data stays in your browser, inside your userscript manager's storage. There 
     "site": "jumia",
     "currency": "GHS",
     "image": "https://gh.jumia.is/.../1.jpg",
+    "target": 1299,
     "created": 1730000000000,
     "samples": [
       { "p": 1499, "op": null, "t": 1730000000000, "src": "dom" },
@@ -262,8 +308,9 @@ All data stays in your browser, inside your userscript manager's storage. There 
 - `p` — price (number).
 - `op` — old/pre-discount price, when the page exposes one.
 - `t` — sample timestamp in milliseconds.
-- `src` — extraction strategy that produced the sample.
+- `src` — extraction strategy that produced the sample (`dom`, `json-ld`, `state`, `meta`, or `watch` for a background check).
 - `image` — optional absolute image URL.
+- `target` — optional target price in the product's currency.
 
 Product keys:
 
@@ -274,9 +321,11 @@ Product keys:
 
 The script performs network requests only to:
 
-- `jumia.com.gh` / `www.jumia.com.gh` — coupon pages and image backfill.
+- `jumia.com.gh` / `www.jumia.com.gh` — coupon pages, image backfill, and optional smart-watch product checks.
 - `aliexpress.com` / `*.aliexpress.com` — coupon pages and image backfill.
 - Product image CDNs referenced by page metadata, when the browser renders a thumbnail.
+
+Background product checks are opt-in, capped at 40 per day, and run only while a tab is visible. They send the same kind of GET requests your browser would send when you open a product page.
 
 Requests are restricted by the script's `@connect` rules. Cookies for the current site may accompany gallery requests, as with any page request your browser makes.
 
@@ -285,8 +334,8 @@ Requests are restricted by the script's `@connect` rules. Cookies for the curren
 ## Known limitations
 
 - **Single sample = 0% change.** A newly tracked product shows `+0.0%` and equal current/low/high values until a second, different sample arrives.
-- **Prices are snapshots.** Price history only grows when you visit (or refresh) a product page. There is no background crawler.
-- **AliExpress blocking.** AliExpress may challenge `GM_xmlhttpRequest` page fetches; coupon sync and image backfill can fail there. Live capture from pages you actually open still works.
+- **Prices are snapshots.** Price history grows when you visit (or refresh) a product page. The optional smart watch adds budgeted background checks; it is off by default and never runs without an open tab.
+- **AliExpress blocking.** Background checks are skipped for AliExpress because it serves challenge pages to scripted requests; coupon sync and image backfill can fail there too. Live capture from pages you actually open still works.
 - **Currency follows the site.** Formatting is GHS-oriented but prints whatever currency the page/extractor reports; it does not convert between currencies.
 - **Coupon discovery is heuristic.** Login-gated, personalised, or image-only offers may be missed; stale codes may persist until they expire or you clear the cache.
 - **Dashboard size.** Product rows are sorted and filtered client-side; extremely large histories remain usable but longer to render.
@@ -372,7 +421,7 @@ The script is an IIFE with no exports, so tests load it into a DOM and stub the 
 - `GM_xmlhttpRequest` returning canned HTML.
 - `GM_notification`, `alert`, and `confirm` stubs.
 
-Use jsdom (`npm install jsdom`) to verify extraction, storage, merge behaviour, panel/dashboard rendering, and image handling. A headless Chromium screenshot is useful for layout checks:
+Use jsdom (`npm install jsdom`) to verify extraction, storage, merge behaviour, panel/dashboard rendering, image handling, and smart-watch scheduling. Smart-watch tests should cover: `304` handling, the daily budget cap, canary campaign detection, target prioritisation, AliExpress skipping, visit-side metadata updates, and target merging. A headless Chromium screenshot is useful for layout checks:
 
 ```bash
 msedge --headless=new --disable-gpu --hide-scrollbars \
@@ -405,7 +454,7 @@ The project follows a pragmatic `MAJOR.MINOR.PATCH` scheme:
 - **MINOR** — new sites, major features, new dashboard capabilities.
 - **PATCH** — bug fixes, selector updates, styling and documentation fixes.
 
-Current release: **3.4.0** — product images, image backfill, and dark-mode-safe controls. See [`CHANGELOG.md`](CHANGELOG.md).
+Current release: **3.5.0** — opt-in smart watch with canary-gated, budgeted background checks and target prices. See [`CHANGELOG.md`](CHANGELOG.md).
 
 ---
 

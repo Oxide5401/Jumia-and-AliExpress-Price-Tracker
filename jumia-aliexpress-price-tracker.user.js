@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jumia Ghana – Price Tracker + Coupons + Dashboard
 // @namespace    https://github.com/yourname/jumia-price-tracker
-// @version      3.4.0
+// @version      3.5.0
 // @description  Robust price tracker with product images, persistent coupon finder, and tracking dashboard for jumia.com.gh and aliexpress.com (Ghana / GHS)
 // @author       Oxide5401
 // @homepageURL  https://github.com/Oxide5401/Jumia-and-AliExpress-Price-Tracker
@@ -97,6 +97,29 @@
         extractAttempts: SITE.extractAttempts,
         extractDelayMs: SITE.extractDelayMs,
         firstExtractDelayMs: SITE.firstExtractDelayMs,
+
+        // ── Smart watch (opt-in background price checks) ─────────────
+        // Values are deliberately conservative: a few dozen page reads a
+        // day, spread out, instead of polling every tracked product.
+        smartWatchKey: 'jumia_gh_smart_watch',
+        watchStateKey: 'jumia_gh_smart_watch_state',
+        watch: {
+            maxChecksPerDay: 40,          // hard daily request budget (all hosts)
+            minGapMs: 8000,               // minimum spacing between checks
+            tickMs: 5 * 60 * 1000,        // scheduler wake-up interval
+            jitter: 0.2,                  // ±20% on every interval
+            canaryCount: 3,               // signal products per site
+            canaryIntervalMs: 6 * 60 * 60 * 1000,
+            campaignThreshold: 2,         // canaries changed => campaign
+            campaignWindowMs: 6 * 60 * 60 * 1000,
+            campaignActiveMs: 12 * 60 * 60 * 1000,
+            minIntervalMs: 6 * 60 * 60 * 1000,
+            maxIntervalMs: 14 * 24 * 60 * 60 * 1000,
+            targetNearRatio: 0.10,        // within 10% of target => daily
+            requestTimeoutMs: 20000,
+            fetchAliExpress: false,       // AliExpress blocks scripted fetches
+            leaseMs: 90000,               // cross-tab lock lifetime
+        },
     };
 
     const CURRENCY_SYMBOLS = {
@@ -176,6 +199,26 @@
         s = String(s || '');
         return s.length > n ? s.slice(0, n - 1) + '…' : s;
     }
+    /** Cleans a page-derived name; rejects challenge/blocked pages. */
+    function cleanProductName(raw) {
+        const name = String(raw || '')
+            .replace(/[\u200B-\u200D\u2060\uFEFF]/g, '')
+            .replace(/\s+/g, ' ')
+            .trim();
+        if (name.length < 3) return '';
+        if (/access denied|just a moment|captcha|are you a robot|robot check|request blocked|attention required/i.test(name))
+            return '';
+        return name;
+    }
+    function shortDuration(ms) {
+        if (!ms || ms < 0) return 'now';
+        const mins = Math.round(ms / 60000);
+        if (mins < 1) return 'moments';
+        if (mins < 60) return `${mins}m`;
+        const hours = Math.round(mins / 60);
+        if (hours < 48) return `${hours}h`;
+        return `${Math.round(hours / 24)}d`;
+    }
     /** Fallback for products whose stored name is missing/blank/invisible. */
     function displayName(key, p) {
         const raw = String((p && p.name) || '')
@@ -228,8 +271,8 @@
     // ──────────────────────────────────────────────────────────────
     // 3. PRICE EXTRACTION
     // ──────────────────────────────────────────────────────────────
-    function cleanUrl(u) {
-        try { return new URL(u, location.origin).href.split(/[?#]/)[0]; }
+    function cleanUrl(u, base) {
+        try { return new URL(u, base || location.href).href.split(/[?#]/)[0]; }
         catch { return ''; }
     }
 
@@ -307,9 +350,9 @@
     }
 
 
-    function extractFromJsonLd() {
-        const here = cleanUrl(location.href);
-        const scripts = document.querySelectorAll('script[type="application/ld+json"]');
+    function extractFromJsonLd(doc = document, base = location.href) {
+        const here = cleanUrl(base);
+        const scripts = doc.querySelectorAll('script[type="application/ld+json"]');
         let best = null;
         for (const script of scripts) {
             let data;
@@ -333,7 +376,7 @@
                     name: item.name || '',
                     url: item.url || item['@id'] || '',
                 };
-                if (cand.url && cleanUrl(cand.url) === here) return cand;
+                if (cand.url && cleanUrl(cand.url, base) === here) return cand;
                 if (cand.name) {
                     const slug = cand.name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 25);
                     if (slug.length > 8 && here.toLowerCase().includes(slug)) return cand;
@@ -345,20 +388,20 @@
     }
 
     // ── Jumia ────────────────────────────────────────────────────
-    function findMainProductContainer() {
-        const h1 = document.querySelector('h1.name, h1.-fs20, main h1');
+    function findMainProductContainer(doc = document) {
+        const h1 = doc.querySelector('h1.name, h1.-fs20, main h1');
         if (!h1) return null;
         let el = h1.parentElement, depth = 0;
-        while (el && el !== document.body && depth < 8) {
+        while (el && el !== doc.body && depth < 8) {
             if (el.querySelector('.prc, [data-price], .price, .-b')) return el;
             el = el.parentElement; depth++;
         }
         return h1.parentElement;
     }
 
-    function extractFromDomJumia() {
-        const h1 = document.querySelector('h1.name, main h1, h1');
-        const container = findMainProductContainer();
+    function extractFromDomJumia(doc = document) {
+        const h1 = doc.querySelector('h1.name, main h1, h1');
+        const container = findMainProductContainer(doc);
         let priceEl = null;
         const BAD_ANCESTOR = '[class*="sponsor"], [class*="similar"], [class*="recommend"], section[data-track], aside';
 
@@ -369,7 +412,7 @@
         }
         if (!priceEl) {
             for (const s of ['main section .prc', 'main .prc', '.product-top .prc', '[data-product] .prc']) {
-                const el = document.querySelector(s);
+                const el = doc.querySelector(s);
                 if (el && !el.closest(BAD_ANCESTOR)) { priceEl = el; break; }
             }
         }
@@ -414,15 +457,15 @@
         '.es--m6',
     ];
 
-    function queryInOrder(selectors) {
+    function queryInOrder(selectors, doc = document) {
         for (const s of selectors) {
-            const el = document.querySelector(s);
+            const el = doc.querySelector(s);
             if (el) return el;
         }
         return null;
     }
 
-    function extractFromDomAliExpress() {
+    function extractFromDomAliExpress(doc = document) {
         const h1 = queryInOrder([
             'h1[data-pl="product-title"]',
             'h1.product-title-text',
@@ -430,13 +473,13 @@
             'main h1',
             'h1',
             '[class*="Product_Name__container"]',
-        ]);
-        let name = h1 ? h1.textContent.trim() : (document.title || '');
+        ], doc);
+        let name = h1 ? h1.textContent.trim() : (doc.title || '');
         name = name.replace(/\s*[-|–]\s*AliExpress.*$/i, '').trim();
 
         for (const sel of ALI_PRICE_SELECTORS) {
             let nodes;
-            try { nodes = document.querySelectorAll(sel); } catch { continue; }
+            try { nodes = doc.querySelectorAll(sel); } catch { continue; }
             for (const el of nodes) {
                 if (el.closest(ALI_BAD_ANCESTOR)) continue;
                 const text = (el.textContent || '').trim();
@@ -461,11 +504,11 @@
 
     // Fallback: price embedded in AliExpress' inline JSON state.
     let aliStateCache = { url: null, value: null };
-    function extractFromAliExpressState() {
-        if (aliStateCache.url === location.href) return aliStateCache.value;
+    function extractFromAliExpressState(doc = document, base = location.href) {
+        if (aliStateCache.url === base) return aliStateCache.value;
 
         let result = null;
-        const scripts = document.querySelectorAll('script:not([src])');
+        const scripts = doc.querySelectorAll('script:not([src])');
         for (const s of scripts) {
             const t = s.textContent;
             if (!t || t.length > 1500000) continue;
@@ -483,51 +526,51 @@
             result = {
                 price,
                 oldPrice: oldPrice && oldPrice > price ? oldPrice : null,
-                name: document.title || '',
+                name: doc.title || '',
                 currency: detectCurrency(raw),
             };
             break;
         }
-        aliStateCache = { url: location.href, value: result };
+        aliStateCache = { url: base, value: result };
         return result;
     }
 
-    function extractFromMeta() {
-        const amount = document.querySelector(
+    function extractFromMeta(doc = document) {
+        const amount = doc.querySelector(
             'meta[property="product:price:amount"], meta[property="og:price:amount"], meta[itemprop="price"]'
         );
         if (!amount) return null;
         const price = parsePrice(amount.content);
         if (price == null || price <= 0) return null;
-        const curEl = document.querySelector(
+        const curEl = doc.querySelector(
             'meta[property="product:price:currency"], meta[property="og:price:currency"], meta[itemprop="priceCurrency"]'
         );
         return {
             price,
             oldPrice: null,
-            name: document.title,
+            name: doc.title,
             currency: detectCurrency(curEl && curEl.content, SITE.currency),
         };
     }
 
-    function extractPrice() {
+    function extractPrice(doc = document, base = location.href) {
         if (IS_ALI) {
             // DOM first: it reflects the actual sale price the buyer sees.
-            const d = extractFromDomAliExpress();
+            const d = extractFromDomAliExpress(doc);
             if (d && d.price) return { ...d, source: 'dom' };
-            const j = extractFromJsonLd();
+            const j = extractFromJsonLd(doc, base);
             if (j && j.price) return { ...j, source: 'json-ld' };
-            const s = extractFromAliExpressState();
+            const s = extractFromAliExpressState(doc, base);
             if (s && s.price) return { ...s, source: 'state' };
-            const m = extractFromMeta();
+            const m = extractFromMeta(doc);
             if (m && m.price) return { ...m, source: 'meta' };
             return null;
         }
-        const j = extractFromJsonLd();
+        const j = extractFromJsonLd(doc, base);
         if (j && j.price) return { ...j, source: 'json-ld' };
-        const d = extractFromDomJumia();
+        const d = extractFromDomJumia(doc);
         if (d && d.price) return { ...d, currency: SITE.currency, source: 'dom' };
-        const m = extractFromMeta();
+        const m = extractFromMeta(doc);
         if (m && m.price) return { ...m, currency: SITE.currency, source: 'meta' };
         return null;
     }
@@ -577,6 +620,7 @@
             ex.currency = ex.currency || p.currency || SITE.currency;
             ex.site = ex.site || p.site;
             ex.image = ex.image || p.image;
+            if (ex.target == null && typeof p.target === 'number') ex.target = p.target;
             ex.created = Math.min(ex.created || Date.now(), p.created || Date.now());
         }
         saveHistory(h);
@@ -591,9 +635,7 @@
         const history = loadHistory();
         const now = Date.now();
         const image = extractImage();
-        const cleanName = String(info.name || '')
-            .replace(/[\u200B-\u200D\u2060\uFEFF]/g, '')
-            .trim();
+        const cleanName = cleanProductName(info.name);
 
         if (!history[key]) {
             history[key] = {
@@ -618,9 +660,605 @@
         product.site = SITE.id;
         saveHistory(history);
 
+        const changed = !!(last && last.p !== info.price);
+        try { noteLivePrice(key, product, changed); } catch (e) { warn('watch state update failed', e); }
+
         let dropPercent = null;
         if (last && info.price < last.p) dropPercent = ((last.p - info.price) / last.p) * 100;
         return { product, isNew: !last, dropPercent, info };
+    }
+
+    // ──────────────────────────────────────────────────────────────
+    // 4b. SMART WATCH — canary-gated, budgeted background checks
+    // ──────────────────────────────────────────────────────────────
+    // Design: price changes are correlated (campaigns, category sales), so
+    // checking a few volatile "canaries" tells us whether a sweep is worth it.
+    // Every product also has a hazard-based due date and a hard staleness
+    // bound. A global daily budget and per-host cooldown prevent bursts.
+    const MIN_MS = 60e3;
+    const HOUR_MS = 60 * MIN_MS;
+    const DAY_MS = 24 * HOUR_MS;
+    const WATCH_TAB_ID = Math.random().toString(36).slice(2) + Date.now().toString(36);
+    let watchTimer = null;
+    let watchBusy = false;
+
+    function isAliProduct(key, p) {
+        return (p && p.site === 'aliexpress') || String(key || '').startsWith('ali:');
+    }
+    function siteLabelOf(key, p) {
+        return isAliProduct(key, p) ? 'AliExpress Ghana' : 'Jumia Ghana';
+    }
+    function priceOf(p) {
+        return p && Array.isArray(p.samples) && p.samples.length ? p.samples.at(-1).p : null;
+    }
+    function targetOf(p) {
+        return p && typeof p.target === 'number' && isFinite(p.target) ? p.target : null;
+    }
+    function targetMet(p) {
+        const t = targetOf(p), c = priceOf(p);
+        return t != null && c != null && c <= t;
+    }
+    function targetNear(p) {
+        const t = targetOf(p), c = priceOf(p);
+        return t != null && c != null && c > t && c <= t * (1 + CONFIG.watch.targetNearRatio);
+    }
+
+    function newWatchMeta() {
+        return {
+            lastCheck: 0, nextCheck: 0, misses: 0, failures: 0,
+            etag: null, lastModified: null, lastPrice: null, rechecksLeft: 0,
+        };
+    }
+
+    function loadWatchState() {
+        let s;
+        try { s = JSON.parse(GM_getValue(CONFIG.watchStateKey, '{}')); }
+        catch { s = {}; }
+        if (!s || typeof s !== 'object' || Array.isArray(s)) s = {};
+        if (!s.products || typeof s.products !== 'object') s.products = {};
+        if (!s.hosts || typeof s.hosts !== 'object') s.hosts = {};
+        if (!s.canaries || typeof s.canaries !== 'object') s.canaries = {};
+        if (!s.budget || typeof s.budget !== 'object') s.budget = { day: '', used: 0 };
+        if (typeof s.campaignUntil !== 'number') s.campaignUntil = 0;
+        if (typeof s.campaignSince !== 'number') s.campaignSince = 0;
+        if (typeof s.lastRequestAt !== 'number') s.lastRequestAt = 0;
+        if (!s.lease || typeof s.lease !== 'object') s.lease = null;
+        return s;
+    }
+
+    function saveWatchState(s) {
+        try { GM_setValue(CONFIG.watchStateKey, JSON.stringify(s)); }
+        catch (e) { warn('saveWatchState failed', e); }
+    }
+
+    function swEnabled() { return !!GM_getValue(CONFIG.smartWatchKey, false); }
+
+    function ensureWatchMeta(state, key, spread = true) {
+        if (!state.products[key]) {
+            const m = newWatchMeta();
+            m.nextCheck = Date.now() + (spread ? Math.random() * CONFIG.watch.maxIntervalMs : 0);
+            state.products[key] = m;
+        }
+        return state.products[key];
+    }
+
+    function watchDayKey() { return new Date().toDateString(); }
+    function watchBudget(state) {
+        if (!state.budget || state.budget.day !== watchDayKey())
+            state.budget = { day: watchDayKey(), used: 0 };
+        return state.budget;
+    }
+
+    function volatility(p) {
+        const cutoff = Date.now() - 30 * DAY_MS;
+        const recent = (p.samples || []).filter(s => (s.t || 0) >= cutoff);
+        let n = 0;
+        for (let i = 1; i < recent.length; i++)
+            if (recent[i].p !== recent[i - 1].p) n++;
+        return n;
+    }
+
+    /**
+     * Canaries are the most volatile eligible products. A change in two or
+     * more of them within the campaign window is treated as a site signal.
+     */
+    function selectCanaries(history) {
+        const cutoff = Date.now() - 30 * DAY_MS;
+        const pool = [];
+        for (const [key, p] of Object.entries(history || {})) {
+            if (!p || !Array.isArray(p.samples) || !p.samples.length) continue;
+            if (isAliProduct(key, p) && !CONFIG.watch.fetchAliExpress) continue;
+            if (targetMet(p)) continue;
+            const recent = p.samples.filter(s => (s.t || 0) >= cutoff);
+            let changes = 0;
+            for (let i = 1; i < recent.length; i++)
+                if (recent[i].p !== recent[i - 1].p) changes++;
+            pool.push({ key, changes, last: p.samples.at(-1).t || 0 });
+        }
+        pool.sort((a, b) => b.changes - a.changes || b.last - a.last);
+        return new Set(pool.slice(0, CONFIG.watch.canaryCount).map(x => x.key));
+    }
+
+    /** Interval until the next check, from volatility, misses and rechecks. */
+    function watchNextDelay(key, p, meta, changed, canaries) {
+        const w = CONFIG.watch;
+        let interval;
+        if (changed) {
+            meta.rechecksLeft = 2;              // 1h, then 6h, then 24h
+            interval = HOUR_MS;
+        } else if (meta.rechecksLeft > 0) {
+            interval = meta.rechecksLeft === 2 ? 6 * HOUR_MS : 24 * HOUR_MS;
+            meta.rechecksLeft -= 1;
+        } else {
+            const n = volatility(p);
+            interval = n >= 3 ? 6 * HOUR_MS
+                : n === 2 ? 12 * HOUR_MS
+                : n === 1 ? 48 * HOUR_MS
+                : 7 * DAY_MS;
+            // Consecutive unchanged checks earn exponential backoff.
+            interval *= Math.pow(2, Math.min(meta.misses || 0, 2));
+            if (canaries && canaries.has(key)) interval = Math.min(interval, w.canaryIntervalMs);
+            if (targetNear(p)) interval = Math.min(interval, DAY_MS);
+            if (targetMet(p)) interval = w.maxIntervalMs;
+            interval = Math.max(w.minIntervalMs, Math.min(w.maxIntervalMs, interval));
+        }
+        const jitter = 1 + (Math.random() * 2 - 1) * w.jitter;
+        return Math.max(5 * MIN_MS, Math.round(interval * jitter));
+    }
+
+    function noteCanaryChange(state, key) {
+        const now = Date.now();
+        const w = CONFIG.watch;
+        state.canaries[key] = now;
+        for (const [k, t] of Object.entries(state.canaries))
+            if (now - t > w.campaignWindowMs) delete state.canaries[k];
+        const signals = Object.keys(state.canaries).length;
+        if (signals >= w.campaignThreshold) {
+            if (!state.campaignSince || state.campaignSince < now - w.campaignActiveMs)
+                state.campaignSince = now;
+            state.campaignUntil = now + w.campaignActiveMs;
+            log(`Smart watch: campaign signal (${signals} canaries) — scheduling a sweep.`);
+        }
+    }
+
+    /** Keeps scheduler metadata in sync with a normal page visit. */
+    function noteLivePrice(key, product, changed) {
+        const state = loadWatchState();
+        const tracked = !!state.products[key];
+        if (!swEnabled() && !tracked) return;
+        const meta = ensureWatchMeta(state, key, false);
+        const now = Date.now();
+        const canaries = selectCanaries(loadHistory());
+        meta.lastCheck = now;
+        meta.lastPrice = priceOf(product);
+        meta.failures = 0;
+        meta.misses = changed ? 0 : (meta.misses || 0) + 1;
+        meta.nextCheck = now + watchNextDelay(key, product, meta, changed, canaries);
+        if (changed && canaries.has(key)) noteCanaryChange(state, key);
+        saveWatchState(state);
+    }
+
+    function seedWatchState() {
+        const state = loadWatchState();
+        const history = loadHistory();
+        const now = Date.now();
+        for (const key of Object.keys(history)) ensureWatchMeta(state, key, true);
+        for (const key of selectCanaries(history)) {
+            const m = state.products[key];
+            if (m) m.nextCheck = Math.min(m.nextCheck || now, now + (1 + Math.random() * 4) * MIN_MS);
+        }
+        saveWatchState(state);
+    }
+
+    function setSwEnabled(value) {
+        GM_setValue(CONFIG.smartWatchKey, !!value);
+        if (value) {
+            seedWatchState();
+            scheduleWatchTick(5000);
+            log('Smart watch enabled.');
+        } else {
+            if (watchTimer) { clearTimeout(watchTimer); watchTimer = null; }
+            log('Smart watch disabled.');
+        }
+        renderWatchStatus();
+    }
+
+    function resetWatchMeta(key) {
+        const state = loadWatchState();
+        const m = ensureWatchMeta(state, key, false);
+        m.nextCheck = Date.now();
+        m.failures = 0;
+        saveWatchState(state);
+        if (swEnabled()) scheduleWatchTick(5000);
+    }
+
+    // ── HTTP helpers ─────────────────────────────────────────────
+    function parseHeaderMap(raw) {
+        const map = {};
+        String(raw || '').split(/\r?\n/).forEach(line => {
+            const i = line.indexOf(':');
+            if (i > 0) map[line.slice(0, i).trim().toLowerCase()] = line.slice(i + 1).trim();
+        });
+        return map;
+    }
+
+    function parseRetryAfter(headers) {
+        const v = headers && headers['retry-after'];
+        if (!v) return 0;
+        const seconds = Number(v);
+        if (!isNaN(seconds)) return Math.max(0, seconds * 1000);
+        const at = Date.parse(v);
+        return isNaN(at) ? 0 : Math.max(0, at - Date.now());
+    }
+
+    /** GET with conditional validators; resolves 304s instead of rejecting. */
+    function fetchWatchPage(url, meta) {
+        return new Promise((resolve, reject) => {
+            const headers = { 'User-Agent': navigator.userAgent };
+            if (meta.etag) headers['If-None-Match'] = meta.etag;
+            if (meta.lastModified) headers['If-Modified-Since'] = meta.lastModified;
+            GM_xmlhttpRequest({
+                method: 'GET', url, timeout: CONFIG.watch.requestTimeoutMs, headers,
+                onload: r => resolve({
+                    status: r.status,
+                    text: r.responseText || '',
+                    headers: parseHeaderMap(r.responseHeaders || ''),
+                }),
+                onerror: () => reject(new Error('network error')),
+                ontimeout: () => reject(new Error('timeout')),
+            });
+        });
+    }
+
+    function hostOf(key, p) { return isAliProduct(key, p) ? 'aliexpress' : 'jumia'; }
+    function hostReady(state, host) {
+        const h = state.hosts[host];
+        return !h || !h.blockedUntil || h.blockedUntil <= Date.now();
+    }
+    function noteHostSuccess(state, host) {
+        const h = state.hosts[host];
+        if (h) { h.failures = 0; h.blockedUntil = 0; }
+    }
+    function noteHostFailure(state, host, retryAfterMs) {
+        const h = state.hosts[host] || (state.hosts[host] = { failures: 0, blockedUntil: 0 });
+        h.failures = (h.failures || 0) + 1;
+        const backoff = retryAfterMs ||
+            Math.min(24 * HOUR_MS, 30 * MIN_MS * Math.pow(2, Math.min(h.failures, 5)));
+        h.blockedUntil = Date.now() + backoff;
+        return h.blockedUntil;
+    }
+
+    function pruneWatchState(state, history) {
+        for (const key of Object.keys(state.products))
+            if (!history[key]) delete state.products[key];
+        const cutoff = Date.now() - CONFIG.watch.campaignWindowMs;
+        for (const [key, t] of Object.entries(state.canaries))
+            if (!t || t < cutoff) delete state.canaries[key];
+        if (state.campaignUntil && state.campaignUntil < Date.now()) {
+            state.campaignUntil = 0;
+            state.campaignSince = 0;
+            state.canaries = {};
+        }
+    }
+
+    // ── Applying a background result ─────────────────────────────
+    function applyWatchedPrice(key, info, doc, url) {
+        const history = loadHistory();
+        const product = history[key];
+        if (!product) return null;
+        const now = Date.now();
+        const last = product.samples.at(-1) || null;
+        const changed = !last || last.p !== info.price;
+        const stale = !last || now - (last.t || 0) >= DAY_MS;
+
+        // Record a sample on changes, plus one baseline sample per day so a
+        // quiet product doesn't bloat storage with identical points.
+        if (changed || stale) {
+            product.samples.push({ p: info.price, op: info.oldPrice || null, t: now, src: 'watch' });
+            if (product.samples.length > CONFIG.maxSamplesPerProduct)
+                product.samples = product.samples.slice(-CONFIG.maxSamplesPerProduct);
+        }
+
+        const image = imageFromDoc(doc, url, isAliProduct(key, product));
+        if (image) product.image = image;
+        const name = cleanProductName(info.name);
+        if (name) product.name = name;
+        product.url = url;
+        product.currency = info.currency || product.currency || SITE.currency;
+        product.site = product.site || (isAliProduct(key, product) ? 'aliexpress' : 'jumia');
+        saveHistory(history);
+
+        return {
+            changed, stale, product,
+            dropPercent: changed && last && info.price < last.p
+                ? ((last.p - info.price) / last.p) * 100
+                : null,
+        };
+    }
+
+    async function checkWatchedProduct(key, product, state, canaries) {
+        const w = CONFIG.watch;
+        const host = hostOf(key, product);
+        const meta = ensureWatchMeta(state, key, false);
+        const url = product.url;
+        if (!/^https?:/i.test(url || '')) return false;
+
+        let res;
+        try {
+            res = await fetchWatchPage(url, meta);
+        } catch (e) {
+            meta.failures = (meta.failures || 0) + 1;
+            meta.nextCheck = Date.now() + 15 * MIN_MS;
+            noteHostFailure(state, host, 10 * MIN_MS);
+            warn('Smart watch fetch failed:', url, e.message);
+            return false;
+        }
+
+        const now = Date.now();
+        if (res.status === 304) {
+            noteHostSuccess(state, host);
+            meta.lastCheck = now;
+            meta.failures = 0;
+            meta.misses = (meta.misses || 0) + 1;
+            meta.etag = res.headers['etag'] || meta.etag;
+            meta.lastModified = res.headers['last-modified'] || meta.lastModified;
+            meta.nextCheck = now + watchNextDelay(key, product, meta, false, canaries);
+            return true;
+        }
+
+        if (res.status === 403 || res.status === 429 || res.status >= 500) {
+            const retry = Math.max(
+                parseRetryAfter(res.headers),
+                res.status === 403 ? 6 * HOUR_MS : 30 * MIN_MS
+            );
+            const until = noteHostFailure(state, host, retry);
+            meta.failures = (meta.failures || 0) + 1;
+            meta.nextCheck = until;
+            warn('Smart watch blocked:', url, 'HTTP ' + res.status);
+            return false;
+        }
+
+        if (res.status < 200 || res.status >= 300) {
+            meta.failures = (meta.failures || 0) + 1;
+            meta.nextCheck = noteHostFailure(state, host, 30 * MIN_MS);
+            return false;
+        }
+
+        const doc = new DOMParser().parseFromString(res.text, 'text/html');
+        const info = extractPrice(doc, url);
+        if (!info || info.price == null) {
+            meta.failures = (meta.failures || 0) + 1;
+            meta.nextCheck = now + Math.min(
+                24 * HOUR_MS,
+                30 * MIN_MS * Math.pow(2, Math.min(meta.failures, 4))
+            );
+            noteHostFailure(state, host, 30 * MIN_MS);
+            warn('Smart watch: no price found at', url);
+            return false;
+        }
+
+        const applied = applyWatchedPrice(key, info, doc, url);
+        if (!applied) return false;
+
+        noteHostSuccess(state, host);
+        meta.lastCheck = now;
+        meta.lastPrice = info.price;
+        meta.failures = 0;
+        meta.etag = res.headers['etag'] || null;
+        meta.lastModified = res.headers['last-modified'] || null;
+        meta.misses = applied.changed ? 0 : (meta.misses || 0) + 1;
+        meta.nextCheck = now + watchNextDelay(key, applied.product, meta, applied.changed, canaries);
+
+        if (applied.changed && canaries.has(key)) noteCanaryChange(state, key);
+
+        if (applied.changed) {
+            log('Smart watch:', key, info.price,
+                applied.dropPercent != null ? `(-${applied.dropPercent.toFixed(1)}%)` : '');
+            notifyDrop({
+                product: applied.product, info,
+                dropPercent: applied.dropPercent,
+                siteLabel: siteLabelOf(key, applied.product),
+            });
+            const target = targetOf(applied.product);
+            const prev = applied.product.samples.at(-2)?.p;
+            if (target != null && info.price <= target && (prev == null || prev > target)) {
+                notify(
+                    `${siteLabelOf(key, applied.product)}: target reached`,
+                    `${displayName(key, applied.product)}\n` +
+                    `${formatMoney(info.price, info.currency || applied.product.currency)} ` +
+                    `≤ target ${formatMoney(target, applied.product.currency)}`
+                );
+            }
+        }
+        return true;
+    }
+
+    // ── Scheduling ───────────────────────────────────────────────
+    function dueCandidates(history, state, canaries, now, currentKey) {
+        const w = CONFIG.watch;
+        const campaign = state.campaignUntil > now;
+        const out = [];
+        for (const [key, product] of Object.entries(history || {})) {
+            if (key === currentKey) continue;
+            if (!product || !Array.isArray(product.samples) || !product.samples.length) continue;
+            if (!/^https?:/i.test(product.url || '')) continue;
+            if (isAliProduct(key, product) && !w.fetchAliExpress) continue;
+            if (!hostReady(state, hostOf(key, product))) continue;
+
+            const meta = ensureWatchMeta(state, key, true);
+            const canary = canaries.has(key);
+            let dueAt = meta.nextCheck || 0;
+            if (canary) dueAt = Math.min(dueAt, (meta.lastCheck || 0) + w.canaryIntervalMs);
+            if (campaign && (meta.lastCheck || 0) < (state.campaignSince || 0))
+                dueAt = Math.min(dueAt, now);
+            if (dueAt > now) continue;
+
+            const stale = now - (meta.lastCheck || 0) > w.maxIntervalMs;
+            let priority = 0;
+            if (canary) priority = 3;
+            else if (campaign) priority = 2;
+            else if (targetNear(product)) priority = 2;
+            else if (meta.rechecksLeft > 0) priority = 2;
+            else if (stale) priority = 1;
+
+            out.push({ key, product, meta, priority, dueAt, canary, stale });
+        }
+        out.sort((a, b) => b.priority - a.priority || a.dueAt - b.dueAt);
+        return out;
+    }
+
+    function chooseWatchCandidate(due, state, now) {
+        if (!due.length) return null;
+        const canary = due.find(c => c.canary);
+        if (canary) return canary;
+        if (state.campaignUntil > now) return due[0];
+        return due.find(c => c.priority >= 2 || c.stale) || null;
+    }
+
+    function forcedCandidate(history, state, now, currentKey) {
+        const canaries = selectCanaries(history);
+        let best = null;
+        for (const [key, product] of Object.entries(history || {})) {
+            if (key === currentKey) continue;
+            if (!product || !Array.isArray(product.samples) || !product.samples.length) continue;
+            if (!/^https?:/i.test(product.url || '')) continue;
+            if (isAliProduct(key, product) && !CONFIG.watch.fetchAliExpress) continue;
+            if (!hostReady(state, hostOf(key, product))) continue;
+            const meta = ensureWatchMeta(state, key, true);
+            const cand = {
+                key, product, meta,
+                priority: canaries.has(key) ? 3 : 0,
+                dueAt: meta.nextCheck || 0,
+                canary: canaries.has(key),
+                stale: false,
+            };
+            if (!best || (meta.lastCheck || 0) < (best.meta.lastCheck || 0)) best = cand;
+        }
+        return best;
+    }
+
+    function canRunWatch() {
+        try {
+            if (document.visibilityState !== 'visible') return false;
+            if (navigator.onLine === false) return false;
+            if (navigator.connection && navigator.connection.saveData) return false;
+        } catch { /* ignore */ }
+        return true;
+    }
+
+    async function smartWatchTick(force = false) {
+        if (watchBusy) return;
+        if (!swEnabled()) { renderWatchStatus(); return; }
+        if (!canRunWatch()) return;
+
+        const state = loadWatchState();
+        const now = Date.now();
+        if (state.lease && state.lease.until > now && state.lease.id !== WATCH_TAB_ID) return;
+        if (!force && now - (state.lastRequestAt || 0) < CONFIG.watch.minGapMs) return;
+
+        const budget = watchBudget(state);
+        if (!force && budget.used >= CONFIG.watch.maxChecksPerDay) { renderWatchStatus(); return; }
+
+        const history = loadHistory();
+        pruneWatchState(state, history);
+        const canaries = selectCanaries(history);
+        const currentKey = isProductPage() ? getProductKey() : null;
+        const due = dueCandidates(history, state, canaries, now, currentKey);
+        let candidate = chooseWatchCandidate(due, state, now);
+        if (!candidate && force) candidate = forcedCandidate(history, state, now, currentKey);
+        if (!candidate) { saveWatchState(state); renderWatchStatus(); return; }
+
+        watchBusy = true;
+        state.lease = { id: WATCH_TAB_ID, until: now + CONFIG.watch.leaseMs };
+        state.lastRequestAt = now;
+        budget.used += 1;
+        saveWatchState(state);
+
+        try {
+            await checkWatchedProduct(candidate.key, candidate.product, state, canaries);
+        } catch (e) {
+            warn('Smart watch check crashed:', e.message);
+        } finally {
+            watchBusy = false;
+            state.lease = null;
+            saveWatchState(state);
+            updateTrackedBadge();
+            renderWatchStatus();
+        }
+    }
+
+    function scheduleWatchTick(delay) {
+        if (watchTimer) { clearTimeout(watchTimer); watchTimer = null; }
+        if (!swEnabled()) return;
+        const base = delay != null ? delay : CONFIG.watch.tickMs;
+        const wait = Math.max(
+            2000,
+            Math.round(base * (1 + (Math.random() * 2 - 1) * CONFIG.watch.jitter))
+        );
+        watchTimer = setTimeout(() => {
+            watchTimer = null;
+            smartWatchTick().finally(() => scheduleWatchTick());
+        }, wait);
+    }
+
+    function initSmartWatch() {
+        document.addEventListener('visibilitychange', () => {
+            if (swEnabled() && document.visibilityState === 'visible') scheduleWatchTick(8000);
+        });
+        window.addEventListener('online', () => {
+            if (swEnabled()) scheduleWatchTick(8000);
+        });
+        if (swEnabled()) scheduleWatchTick(12000);
+    }
+
+    function watchStatusText() {
+        if (!swEnabled()) return 'Off — prices update only when you visit a product page.';
+        const history = loadHistory();
+        const eligible = Object.entries(history).filter(([key, p]) =>
+            p && Array.isArray(p.samples) && p.samples.length &&
+            (!isAliProduct(key, p) || CONFIG.watch.fetchAliExpress)
+        );
+        if (!eligible.length) {
+            return Object.keys(history).length
+                ? 'No background-checkable products — AliExpress is visit-only.'
+                : 'No products tracked yet.';
+        }
+
+        const state = loadWatchState();
+        const budget = watchBudget(state);
+        const now = Date.now();
+        const canaries = selectCanaries(history);
+        let next = Infinity;
+        for (const [key] of eligible) {
+            const meta = state.products[key];
+            if (!meta) continue;
+            const due = canaries.has(key)
+                ? Math.min(meta.nextCheck || 0, (meta.lastCheck || 0) + CONFIG.watch.canaryIntervalMs)
+                : (meta.nextCheck || 0);
+            if (due > now) next = Math.min(next, due);
+        }
+
+        const parts = [`${budget.used}/${CONFIG.watch.maxChecksPerDay} checks today`];
+        parts.push(`${canaries.size} canar${canaries.size === 1 ? 'y' : 'ies'}`);
+        if (next !== Infinity) parts.push(`next in ${shortDuration(next - now)}`);
+        const blocked = ['jumia', 'aliexpress']
+            .map(host => state.hosts[host] && state.hosts[host].blockedUntil)
+            .filter(t => t > now)
+            .sort((a, b) => a - b)[0];
+        if (blocked) parts.push(`paused ${shortDuration(blocked - now)}`);
+        if (state.campaignUntil > now) parts.push('campaign sweep');
+        return parts.join(' · ');
+    }
+
+    function renderWatchStatus() {
+        const modal = document.getElementById(CONFIG.trackedModalId);
+        if (!modal) return;
+        const cb = modal.querySelector('.jtm-watch-cb');
+        if (cb) cb.checked = swEnabled();
+        const status = modal.querySelector('.jtm-watch-status');
+        if (status) status.textContent = watchStatusText();
+        const checkNow = modal.querySelector('.jtm-watch-now');
+        if (checkNow) checkNow.disabled = !swEnabled();
     }
 
     // ──────────────────────────────────────────────────────────────
@@ -1252,6 +1890,41 @@
         return { ok, failed, remaining, total };
     }
 
+    /**
+     * Prompts for a target price. Targets drive smart-watch priority: products
+     * near their target are checked more often; products at target are left
+     * alone (what you'd buy anyway).
+     */
+    function editTarget(key) {
+        const h = loadHistory();
+        const p = h[key];
+        if (!p) return;
+        const code = p.currency || 'GHS';
+        const cur = p.samples?.at(-1)?.p;
+        const existing = typeof p.target === 'number' ? String(p.target) : '';
+        const answer = prompt(
+            `Target price in ${code} for:\n${displayName(key, p)}\n\n` +
+            `Current: ${cur != null ? formatMoney(cur, code) : '—'}\n` +
+            'Leave empty to remove the target.',
+            existing
+        );
+        if (answer == null) return;
+        const trimmed = answer.trim();
+        if (!trimmed) {
+            delete p.target;
+        } else {
+            const value = parsePrice(trimmed);
+            if (value == null || value <= 0) {
+                alert('Enter a valid price, for example 199.99');
+                return;
+            }
+            p.target = value;
+        }
+        saveHistory(h);
+        resetWatchMeta(key);
+        renderTrackedModal();
+    }
+
     function openTrackedModal() {
         if (document.getElementById(CONFIG.trackedModalId)) { renderTrackedModal(); return; }
         const modal = document.createElement('div');
@@ -1263,6 +1936,14 @@
                     <span>📊 Tracked Products</span>
                     <span class="jtm-count"></span>
                     <button class="jtm-close">×</button>
+                </div>
+                <div class="jtm-watch">
+                    <label class="jtm-watch-toggle" title="Background checks run only while a Jumia/AliExpress tab is open.">
+                        <input type="checkbox" class="jtm-watch-cb">
+                        <span>Smart watch</span>
+                    </label>
+                    <span class="jtm-watch-status">Off</span>
+                    <button class="jtm-watch-now" disabled>Check now</button>
                 </div>
                 <div class="jtm-body"></div>
                 <div class="jtm-footer">
@@ -1309,6 +1990,27 @@
             }
             #${CONFIG.trackedModalId} .jtm-close:hover { color: #333; }
             #${CONFIG.trackedModalId} .jtm-body { flex: 1; overflow-y: auto; padding: 10px 16px; }
+            #${CONFIG.trackedModalId} .jtm-watch {
+                display: flex; align-items: center; gap: 10px;
+                padding: 7px 16px; background: #fbfbfb;
+                border-bottom: 1px solid #eee; font-size: 11px; color: #666;
+            }
+            #${CONFIG.trackedModalId} .jtm-watch-toggle {
+                display: flex; align-items: center; gap: 5px;
+                font-weight: 600; color: #333; cursor: pointer; white-space: nowrap;
+            }
+            #${CONFIG.trackedModalId} .jtm-watch-toggle input { margin: 0; cursor: pointer; }
+            #${CONFIG.trackedModalId} .jtm-watch-status {
+                flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis;
+                white-space: nowrap;
+            }
+            #${CONFIG.trackedModalId} .jtm-watch-now {
+                padding: 4px 9px; border: 1px solid #ccc; background: #fff;
+                border-radius: 4px; cursor: pointer; font-size: 11px; color: #333;
+                white-space: nowrap;
+            }
+            #${CONFIG.trackedModalId} .jtm-watch-now:hover:not(:disabled) { background: #f0f0f0; }
+            #${CONFIG.trackedModalId} .jtm-watch-now:disabled { opacity: .5; cursor: default; }
             #${CONFIG.trackedModalId} .jtm-footer {
                 display: flex; gap: 8px; padding: 10px 16px;
                 border-top: 1px solid #eee; background: #fafafa;
@@ -1321,7 +2023,7 @@
             #${CONFIG.trackedModalId} .jtm-footer .jtm-clear-all { margin-left: auto; color: #b00; border-color: #e2b3b3; }
             #${CONFIG.trackedModalId} .jtm-footer .jtm-clear-all:hover { background: #fdecec; }
             #${CONFIG.trackedModalId} .jtm-row {
-                display: grid; grid-template-columns: 1fr auto auto auto auto auto;
+                display: grid; grid-template-columns: 1fr auto auto auto auto auto auto;
                 gap: 10px; align-items: center;
                 padding: 8px 6px; border-bottom: 1px solid #f0f0f0;
             }
@@ -1386,6 +2088,17 @@
                 font-size: 16px; line-height: 1; padding: 2px 6px; border-radius: 4px;
             }
             #${CONFIG.trackedModalId} .jtm-del:hover { background: #fdecec; }
+            #${CONFIG.trackedModalId} .jtm-target {
+                background: none; border: 1px dashed #ccc; border-radius: 4px;
+                cursor: pointer; font-size: 11px; color: #999;
+                padding: 2px 6px; white-space: nowrap;
+                font-family: ui-monospace, Menlo, monospace;
+            }
+            #${CONFIG.trackedModalId} .jtm-target:hover { border-color: #ff6a00; color: #d35400; }
+            #${CONFIG.trackedModalId} .jtm-target.set { border-style: solid; color: #444; }
+            #${CONFIG.trackedModalId} .jtm-target.met {
+                border-color: #128a3e; background: #eaf7ef; color: #0f7434; font-weight: 700;
+            }
             #${CONFIG.trackedModalId} .jtm-empty { padding: 40px 10px; text-align: center; color: #888; }
             #${CONFIG.trackedModalId} .jtm-toolbar {
                 display: flex; gap: 8px; padding: 6px 6px 10px;
@@ -1487,12 +2200,29 @@
             }
         });
         modal.querySelector('.jtm-body').addEventListener('click', e => {
+            const target = e.target.closest('.jtm-target');
+            if (target) { editTarget(target.dataset.key); return; }
             const del = e.target.closest('.jtm-del');
             if (!del) return;
             const key = del.dataset.key;
             if (!confirm('Stop tracking this product?')) return;
             const h = loadHistory(); delete h[key]; saveHistory(h);
+            resetWatchMeta(key);
             renderTrackedModal(); updateTrackedBadge();
+        });
+
+        const watchCb = modal.querySelector('.jtm-watch-cb');
+        watchCb.addEventListener('change', () => setSwEnabled(watchCb.checked));
+        const watchNow = modal.querySelector('.jtm-watch-now');
+        watchNow.addEventListener('click', async () => {
+            watchNow.disabled = true;
+            watchNow.textContent = 'Checking…';
+            try { await smartWatchTick(true); }
+            finally {
+                watchNow.textContent = 'Check now';
+                renderTrackedModal();
+                updateTrackedBadge();
+            }
         });
 
         renderTrackedModal();
@@ -1520,6 +2250,7 @@
 
         if (!rows.length) {
             body.innerHTML = '<div class="jtm-empty">No products tracked yet.<br>Visit a product page to start tracking.</div>';
+            renderWatchStatus();
             return;
         }
         body.innerHTML = `
@@ -1560,6 +2291,10 @@
                 const code = r.p.currency || 'GHS';
                 const label = displayName(r.key, r.p);
                 const image = r.p.image ? escapeHtml(r.p.image) : '';
+                const target = typeof r.p.target === 'number' && isFinite(r.p.target) ? r.p.target : null;
+                const atTarget = target != null && r.cur != null && r.cur <= target;
+                const targetCls = target != null ? (atTarget ? ' set met' : ' set') : '';
+                const targetText = target != null ? formatMoney(target, code) : '🎯 set';
                 return `
                     <div class="jtm-row">
                         <div class="jtm-name" title="${escapeHtml(label)}">
@@ -1574,6 +2309,7 @@
                             </span>
                             <a class="jtm-name-link" href="${escapeHtml(r.p.url)}" target="_blank" rel="noopener" aria-label="${escapeHtml(label)}"></a>
                         </div>
+                        <button class="jtm-target${targetCls}" data-key="${escapeHtml(r.key)}" title="Set a target price">${targetText}</button>
                         <div class="jtm-cell lbl jtm-cur" data-label="Current">${formatMoney(r.cur, code)}</div>
                         <div class="jtm-cell lbl jtm-low"  data-label="Low">${formatMoney(r.low, code)}</div>
                         <div class="jtm-cell lbl jtm-high" data-label="High">${formatMoney(r.high, code)}</div>
@@ -1585,6 +2321,7 @@
         search.addEventListener('input', renderList);
         sortSel.addEventListener('change', renderList);
         renderList();
+        renderWatchStatus();
     }
 
     // ──────────────────────────────────────────────────────────────
@@ -1614,8 +2351,8 @@
         const prev = r.product.samples.at(-2)?.p;
         const code = r.info.currency || r.product.currency || SITE.currency;
         notify(
-            `Price Drop on ${SITE.label}!`,
-            `${r.product.name}\nNew: ${formatMoney(r.info.price, code)}` +
+            `Price Drop on ${r.siteLabel || SITE.label}!`,
+            `${displayName('', r.product)}\nNew: ${formatMoney(r.info.price, code)}` +
             (prev ? ` (was ${formatMoney(prev, code)})` : '') +
             `\nDrop: -${r.dropPercent.toFixed(1)}%`
         );
@@ -1693,6 +2430,7 @@
         });
 
         watchSpaNavigation();
+        initSmartWatch();
 
         if (!isProductPage()) {
             log('Not a product page — coupon + dashboard mode.');

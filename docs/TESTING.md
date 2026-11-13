@@ -83,6 +83,8 @@ Notes:
 - `firstExtractDelayMs` is 800 ms on Jumia and 1200 ms on AliExpress; wait accordingly.
 - Image `<img>` elements do not load by default in jsdom; assert `src`/`alt` attributes, not pixels.
 - Stub `GM_xmlhttpRequest` per test to return canned HTML or an HTTP error.
+- For scheduler tests, capture `window.setTimeout` into a queue, replace `window.Date.now` with a controllable clock, and run queued callbacks manually. Enable the watch by setting `jumia_gh_smart_watch` to `true` and seeding `jumia_gh_smart_watch_state` (rather than relying on randomized seeding).
+- `switchToOffline`/hidden-tab behaviour can be tested by setting `document.visibilityState` via `Object.defineProperty` or by removing `pretendToBeVisual`.
 
 ---
 
@@ -123,6 +125,17 @@ These are the assertions worth keeping when changing extraction, storage, or UI.
 - Site tags render correctly (`Jumia` grey, `AliExpress` red).
 - Export produces parseable JSON; Import → Merge reports the correct product/sample counts.
 - Under hostile CSS (`a { color: transparent !important; -webkit-text-fill-color: transparent !important }`), names, tags, and the footer buttons remain visible.
+- Target button shows `🎯 set` when unset, the formatted target when set, and a green `.met` state at/below target.
+
+### Smart watch
+- **304:** a stored `ETag` is sent as `If-None-Match`; a `304` adds no sample, increments misses, and pushes `nextCheck` forward.
+- **Budget:** after `maxChecksPerDay` (40) checks, ticks stop issuing product requests until the calendar day changes.
+- **Canaries:** changing two canaries within the campaign window sets `campaignUntil`; a single change does not.
+- **Priority:** a near-target product is chosen ahead of a quiet non-canary; an at-target product is not polled.
+- **AliExpress:** with `fetchAliExpress: false`, AliExpress products produce zero background requests and the status line explains "visit-only".
+- **Visit sync:** loading a product page with the watch off still refreshes that product's `lastCheck`/`nextCheck` in `jumia_gh_smart_watch_state`.
+- **Merge:** importing a product that lacks a target but whose export includes one stores the target.
+- **Politeness:** no more than one request is in flight, `minGapMs` is respected, and 403/429 responses set `hosts[host].blockedUntil`.
 
 ---
 
@@ -168,6 +181,12 @@ The UI must remain readable.
 - [ ] Change price via DevTools before Refresh: drop notification fires at ≥5%.
 - [ ] Coupons: **Find Coupons** populates the list; clicking a code copies it; **all** toggles.
 - [ ] **Fetch images** fills thumbnails for products without images; a second click resumes.
+- [ ] Open dashboard → tick **Smart watch**: status shows `0/40 checks today · 3 canaries · next in …`.
+- [ ] Click **Check now**: one product request appears in DevTools, the status budget increments, and the row's current price reflects the result.
+- [ ] Set a target via 🎯: badge appears; a target already met renders green and the product stops being scheduled.
+- [ ] Reload after a background check: the new sample survives and shows `src: "watch"` in Export JSON.
+- [ ] Leave the tab hidden: no new requests. Return to the tab: checks resume.
+- [ ] Untick **Smart watch**: no further scheduled requests.
 
 ### AliExpress
 - [ ] Load an item page: `AliExpress` badge, name, price, and GHS formatting.
@@ -175,6 +194,7 @@ The UI must remain readable.
 - [ ] Revisit an item: sample appended, `lastTrackedKey` prevents duplicates.
 - [ ] Thumbnail appears when the item is visited (backfill may fail by design).
 - [ ] Coupons: page scan finds `Code：AE10`-style codes; coupon-page fetch is login-gated.
+- [ ] Dashboard status explains that AliExpress is visit-only, and no background requests hit `aliexpress.com`.
 
 ### Data safety
 - [ ] Install over 3.2.0: tracked count and coupons survive (no uninstall).
@@ -199,5 +219,7 @@ The UI must remain readable.
 | AliExpress backfill always fails | expected: challenge page from `GM_xmlhttpRequest` |
 | Coupons never appear | strict validation rejected them, or the site changed markup; check `[Price Tracker]` console logs |
 | Import says 0 merged | JSON shape is not an object of products, or samples are empty |
+| Smart watch never checks | watch is off, budget exhausted, tab hidden, host backing off, or all products are AliExpress/at-target |
+| Smart watch checks too often | lower `maxChecksPerDay`, raise `minIntervalMs`, or set targets to retire aspirational products |
 
 Include browser, userscript manager version, site, URL shape, and console output in bug reports.
