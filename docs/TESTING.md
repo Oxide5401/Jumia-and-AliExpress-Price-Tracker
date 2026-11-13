@@ -122,11 +122,13 @@ These are the assertions worth keeping when changing extraction, storage, or UI.
 
 ### UI
 - Panel shows the product name and thumbnail after `updatePrice`/tracking.
-- Dashboard lists all products, filters by name, and sorts by recent/drop/rise/price/name.
+- Dashboard lists all products, filters by name, and sorts by recent changes/recent/drop/rise/price/name.
 - Site tags render correctly (`Jumia` grey, `AliExpress` red).
 - Export produces parseable JSON; Import → Merge reports the correct product/sample counts.
 - Under hostile CSS (`a { color: transparent !important; -webkit-text-fill-color: transparent !important }`), names, tags, and the footer buttons remain visible.
 - Target button shows `🎯 set` when unset, the formatted target when set, and a green `.met` state at/below target.
+- A movement within 7 days renders a `.jtm-flag.down|up` badge with the percentage, and the row gains `.jtm-row.changed`. Older movement shows no badge.
+- `latestChange` ignores a later unchanged sample and still reports the earlier movement.
 
 ### Smart watch
 - **304:** a stored `ETag` is sent as `If-None-Match`; a `304` adds no sample, increments misses, and pushes `nextCheck` forward.
@@ -136,6 +138,7 @@ These are the assertions worth keeping when changing extraction, storage, or UI.
 - **AliExpress:** with `fetchAliExpress: false`, AliExpress products produce zero background requests and the status line explains "visit-only".
 - **Visit sync:** loading a product page with the watch off still refreshes that product's `lastCheck`/`nextCheck` in `jumia_gh_smart_watch_state`.
 - **Merge:** importing a product that lacks a target but whose export includes one stores the target.
+- **Open dashboard refresh:** a change found by a background tick re-renders an open dashboard in place, moves the product to the top under **Recent**, adds the change badge, and preserves the current search text, sort choice, and scroll position.
 - **Politeness:** no more than one request is in flight, `minGapMs` is respected, and 403/429 responses set `hosts[host].blockedUntil`.
 
 ---
@@ -157,6 +160,7 @@ Look for:
 - thumbnails or placeholder present in every row,
 - footer buttons readable,
 - price columns aligned,
+- change badge does not push the name into an unreadable wrap,
 - no horizontal overflow at 720 px modal width.
 
 To test dark mode and anchor-hostile environments, inject this before the script:
@@ -184,6 +188,9 @@ The UI must remain readable.
 - [ ] **Fetch images** fills thumbnails for products without images; a second click resumes.
 - [ ] Open dashboard → tick **Smart watch**: status shows `0/40 checks today · 3 canaries · next in …`.
 - [ ] Click **Check now**: one product request appears in DevTools, the status budget increments, and the row's current price reflects the result.
+- [ ] With the dashboard open and sorted by **Recent**, make a background check detect a lower price: the row moves to the top during the refresh, shows a `↓x.x%` badge, and keeps your search text, sort, and scroll position.
+- [ ] Select **Recent changes**: products with the newest real movements come first, even if a later unchanged check appended a baseline sample.
+- [ ] The change badge disappears after 7 days (temporarily lower `changeHighlightMs` to verify).
 - [ ] Set a target via 🎯: badge appears; a target already met renders green and the product stops being scheduled.
 - [ ] Reload after a background check: the new sample survives and shows `src: "watch"` in Export JSON.
 - [ ] Leave the tab hidden: no new requests. Return to the tab: checks resume.

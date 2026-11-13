@@ -34,7 +34,8 @@ timer → smartWatchTick()
           ├─ dueCandidates() / chooseWatchCandidate()
           ├─ fetchWatchPage()  (conditional GET)
           ├─ DOMParser → extractPrice(doc, url)
-          └─ applyWatchedPrice() → notifyDrop() → reschedule
+          ├─ applyWatchedPrice() → notifyDrop() → reschedule
+          └─ if price changed → refreshDashboardIfOpen()
 ```
 
 Coupons are handled on every page. Product tracking only runs on pages that match the site's product-page pattern.
@@ -48,13 +49,13 @@ The file is divided into nine commented sections, plus the smart-watch module in
 | Section | Responsibility | Key functions |
 | --- | --- | --- |
 | 1 | Site detection + config | `SITES`, `SITE`, `IS_ALI`, `CONFIG` |
-| 2 | Utilities | `parsePrice`, `detectCurrency`, `formatMoney`, `formatPrice`, `getProductKey`, `escapeHtml`, `truncate`, `cleanProductName`, `shortDuration`, `displayName`, `setThumb`, `timeAgo`, `copyToClipboard` |
+| 2 | Utilities | `parsePrice`, `detectCurrency`, `formatMoney`, `formatPrice`, `getProductKey`, `escapeHtml`, `truncate`, `cleanProductName`, `shortDuration`, `latestChange`, `displayName`, `setThumb`, `timeAgo`, `copyToClipboard` |
 | 3 | Price + image extraction | `cleanUrl`, `absoluteImage`, `productNodesOf`, `imageFromDoc`, `extractImage`, `extractFromJsonLd`, `extractFromDomJumia`, `extractFromDomAliExpress`, `extractFromAliExpressState`, `extractFromMeta`, `extractPrice` |
 | 4 | Price storage | `loadHistory`, `saveHistory`, `mergeHistoryData`, `recordPrice` |
 | **4b** | **Smart watch scheduler** | `loadWatchState`, `selectCanaries`, `watchNextDelay`, `noteLivePrice`, `smartWatchTick`, `checkWatchedProduct`, `applyWatchedPrice`, `initSmartWatch`, `renderWatchStatus` |
 | 5 | Coupons | validation sets, `extractCouponsFromDom`, `mergeCoupons`, `loadCoupons`, `saveCoupons`, `purgeInvalidCoupons`, `fetchHtml`, `refreshCouponsFromWeb`, `scanCurrentPageForCoupons`, `rankCoupons` |
 | 6 | Main panel | `createPanel`, `updateTrackedBadge`, `updatePanel`, `renderCoupons` |
-| 7 | Tracked-products dashboard | `backfillImages`, `editTarget`, `openTrackedModal`, `renderTrackedModal` |
+| 7 | Tracked-products dashboard | `backfillImages`, `editTarget`, `openTrackedModal`, `refreshDashboardIfOpen`, `renderTrackedModal(preserve)` |
 | 8 | Notifications | `notify`, `notifyDrop` |
 | 9 | Main / bootstrap | `isProductPage`, `trackCurrentPage`, `watchSpaNavigation`, `init` |
 
@@ -266,6 +267,8 @@ Limits enforced in `smartWatchTick`:
 
 `applyWatchedPrice` appends a sample when the price changed or the newest sample is ≥ 24h old (keeping quiet products from bloating storage). New samples use `src: 'watch'`. Drops go through the same `notifyDrop` path; crossing a target fires a separate notification.
 
+`checkWatchedProduct` returns `{ ok, changed }`. When `changed` is true, `smartWatchTick` calls `refreshDashboardIfOpen()` after releasing the lease, so an open dashboard reflects the new price immediately. Normal visits do the same from `recordPrice`.
+
 `noteLivePrice` runs on every normal product visit, even when the watch is off, so manual browsing keeps `lastCheck` / `nextCheck` coherent. It only writes when the watch is enabled or the product already has scheduler state.
 
 ---
@@ -299,11 +302,15 @@ Web sync honours `CONFIG.couponCacheTTLMs` (6 hours) unless forced by **Find Cou
 - Modal with a fixed backdrop, smart-watch bar, toolbar, list, import overlay, and footer actions.
 - The smart-watch bar contains the enable checkbox, live status text, and **Check now**. `renderWatchStatus` only reads/updates this bar, so it is safe to call after any list render.
 - Rows are generated from history; sorting/filtering happens in memory and re-renders the list only.
-- Per-row markup uses four deliberate patterns:
+- `renderTrackedModal(preserve)` reads `.jtm-search`, `.jtm-sort`, and `.jtm-body.scrollTop` before replacing the body, then restores them. `refreshDashboardIfOpen()` calls it with `preserve = true` when a price change lands, so an open dashboard updates without losing the user's view.
+- `latestChange(product)` walks samples backwards to find the most recent pair of differing prices. This is deliberately not "compare the last two samples": the daily `src: 'watch'` baseline can append an unchanged point after a real movement.
+- Per-row markup uses five deliberate patterns:
   - **Name:** `<span class="jtm-name-text">` for text + absolutely positioned `<a class="jtm-name-link">` overlay. This survives CSS that hides anchor text.
   - **Thumbnail:** `<span class="jtm-thumb">` containing an `<img>` or the 🛍 placeholder.
   - **Tag:** `<span class="jtm-tag">` with an `.ali` modifier for AliExpress.
+  - **Change badge:** `<span class="jtm-flag down|up">` with `↓`/`↑` and the percentage move, shown only when the movement is within `CONFIG.watch.changeHighlightMs` (7 days). The row also gets `.changed` plus `.down`/`.up` for tinting.
   - **Target:** `<button class="jtm-target">`; shows `🎯 set` when unset, the formatted target when set, and a green `.met` state when the current price is at/below it. Clicking calls `editTarget`.
+- The sort menu includes **Recent changes**, which orders by `latestChange(...).t` with the last sample time as a tie-breaker.
 - A capture-phase `error` listener on the modal swaps broken images for the placeholder (image `error` events do not bubble).
 - Footer actions: Export, Import (merge), Fetch images, Clear All.
 

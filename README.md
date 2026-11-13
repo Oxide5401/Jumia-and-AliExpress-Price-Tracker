@@ -2,7 +2,7 @@
 
 A single Tampermonkey/Violentmonkey userscript that tracks product prices on **Jumia Ghana** (`jumia.com.gh`) and **AliExpress** (Ghana shipping, GHS), finds and stores coupon codes, and shows everything in one dashboard — including **product thumbnails**.
 
-![Version](https://img.shields.io/badge/version-3.5.0-orange)
+![Version](https://img.shields.io/badge/version-3.6.0-orange)
 ![License](https://img.shields.io/badge/license-MIT-blue)
 ![Platform](https://img.shields.io/badge/platform-Tampermonkey%20%7C%20Violentmonkey-2ea44f)
 
@@ -56,6 +56,12 @@ A single Tampermonkey/Violentmonkey userscript that tracks product prices on **J
 - Graceful 🛍 placeholder when an image is missing, blocked, or fails to load.
 - **Fetch images** button backfills images for products tracked by older versions.
 
+### Price-change highlighting (new in 3.6.0)
+- When a background check or a page visit detects a new price, an **open dashboard updates itself** without losing your search text, sort choice, or scroll position.
+- Changed products show a `↓` / `↑` badge with the size of the move and rise to the top under the default **Recent** sort.
+- Recently changed rows get a subtle green (drop) or orange (rise) tint for **7 days**.
+- A **Recent changes** sort orders every product by the time of its last real movement, so changes stay findable even after later unchanged checks.
+
 ### Smart watch (new in 3.5.0, off by default)
 - Optional background price checks while a Jumia or AliExpress tab is open — no server, no always-on background page.
 - **Canary-gated:** a few volatile products act as signals; the rest are checked only when there is evidence a price may have moved.
@@ -75,8 +81,9 @@ A single Tampermonkey/Violentmonkey userscript that tracks product prices on **J
 
 ### Dashboard
 - One list for both sites, with a `Jumia` / `AliExpress` tag per row.
-- Search by name; sort by recent, biggest drop/rise, lowest/highest price, or name.
+- Search by name; sort by recent changes, recent, biggest drop/rise, lowest/highest price, or name.
 - Per-row current / low / high / change, plus a delete button.
+- `↓` / `↑` badges and a soft tint mark products that moved within the last 7 days.
 - **Export JSON**, merge-safe **Import JSON**, **Fetch images**, and **Clear All**.
 - Works on any page of either site — you do not need to be on a product page.
 
@@ -173,8 +180,10 @@ Coupon extraction is best-effort. Campaign codes and login-gated offers change f
 Open it with the 📊 button in the panel.
 
 - **Filter by name** — case-insensitive substring match; blank stored names still match their fallback label.
-- **Sort** — Recent (last sample), Biggest drop, Biggest rise, Lowest price, Highest price, Name.
-- **Rows** — site tag, thumbnail, name (tooltip shows the full stored name), target, current, low, high, change, delete.
+- **Sort** — Recent changes (last real price movement), Recent (last sample), Biggest drop, Biggest rise, Lowest price, Highest price, Name.
+- **Rows** — site tag, thumbnail, change badge, name (tooltip shows the full stored name), target, current, low, high, change, delete.
+- **Live updates** — if a background check or the page you are on records a new price, the open dashboard refreshes in place and keeps your filter, sort, and scroll position.
+- **Change highlight** — a `↓` / `↑` badge and soft row tint mark movement within the last 7 days. The badge tooltip shows the old and new price.
 - **Smart watch bar** — enable/disable background checks, see today's budget and next check, or run one check immediately.
 - **Export JSON** — copies the full history to the clipboard as pretty-printed JSON.
 - **Import JSON** — paste an export; **Merge** adds new products/samples and fills missing fields without deleting anything.
@@ -430,7 +439,7 @@ npm install jsdom
 node tests/smartwatch.test.cjs
 ```
 
-Smart-watch tests should cover: `304` handling, the daily budget cap, canary campaign detection, target prioritisation, AliExpress skipping, visit-side metadata updates, and target merging. A headless Chromium screenshot is useful for layout checks:
+Smart-watch tests should cover: `304` handling, the daily budget cap, canary campaign detection, target prioritisation, AliExpress skipping, visit-side metadata updates, target merging, and open-dashboard refresh with change badges. A headless Chromium screenshot is useful for layout checks:
 
 ```bash
 msedge --headless=new --disable-gpu --hide-scrollbars \
@@ -463,7 +472,7 @@ The project follows a pragmatic `MAJOR.MINOR.PATCH` scheme:
 - **MINOR** — new sites, major features, new dashboard capabilities.
 - **PATCH** — bug fixes, selector updates, styling and documentation fixes.
 
-Current release: **3.5.0** — opt-in smart watch with canary-gated, budgeted background checks and target prices. See [`CHANGELOG.md`](CHANGELOG.md).
+Current release: **3.6.0** — changed products surface automatically in an open dashboard, with change badges and a **Recent changes** sort. See [`CHANGELOG.md`](CHANGELOG.md).
 
 ---
 

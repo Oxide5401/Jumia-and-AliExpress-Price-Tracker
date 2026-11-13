@@ -2,6 +2,19 @@
 
 All notable changes to this project are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions use `MAJOR.MINOR.PATCH`.
 
+## [3.6.0] — 2026-11-13
+
+### Added
+- **Changed products surface in the dashboard.** When a smart-watch check or a normal page visit records a different price, an already-open dashboard re-renders in place instead of waiting for you to close and reopen it.
+- **Change badge.** Rows that moved within the last 7 days show a `↓` / `↑` badge with the percentage move; the tooltip shows the previous and new price.
+- **Row tint.** Recent drops get a soft green tint and recent rises a soft orange tint, so movement is visible even while scrolling.
+- **Recent changes sort.** A new dashboard sort orders products by the time of their last real movement, independent of later unchanged baseline samples.
+
+### Changed
+- Dashboard re-renders triggered by data changes preserve the current search text, sort selection, and scroll position.
+- `checkWatchedProduct` now reports whether the price actually changed, so only real changes refresh the UI.
+- `latestChange` walks backwards through samples, so a later unchanged daily baseline cannot hide the most recent movement.
+
 ## [3.5.0] — 2026-11-13
 
 ### Added

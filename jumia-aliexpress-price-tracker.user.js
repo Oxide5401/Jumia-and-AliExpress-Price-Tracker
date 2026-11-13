@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jumia Ghana – Price Tracker + Coupons + Dashboard
 // @namespace    https://github.com/yourname/jumia-price-tracker
-// @version      3.5.0
+// @version      3.6.0
 // @description  Robust price tracker with product images, persistent coupon finder, and tracking dashboard for jumia.com.gh and aliexpress.com (Ghana / GHS)
 // @author       Oxide5401
 // @homepageURL  https://github.com/Oxide5401/Jumia-and-AliExpress-Price-Tracker
@@ -116,6 +116,7 @@
             minIntervalMs: 6 * 60 * 60 * 1000,
             maxIntervalMs: 14 * 24 * 60 * 60 * 1000,
             targetNearRatio: 0.10,        // within 10% of target => daily
+            changeHighlightMs: 7 * 24 * 60 * 60 * 1000, // flag recent changes for 7d
             requestTimeoutMs: 20000,
             fetchAliExpress: false,       // AliExpress blocks scripted fetches
             leaseMs: 90000,               // cross-tab lock lifetime
@@ -218,6 +219,27 @@
         const hours = Math.round(mins / 60);
         if (hours < 48) return `${hours}h`;
         return `${Math.round(hours / 24)}d`;
+    }
+    /**
+     * Most recent actual price movement in a product's samples. Scanning
+     * backwards finds the last differing pair even when a later unchanged
+     * baseline sample was appended.
+     */
+    function latestChange(p) {
+        const s = p && p.samples;
+        if (!Array.isArray(s) || s.length < 2) return null;
+        for (let i = s.length - 1; i > 0; i--) {
+            const to = s[i], from = s[i - 1];
+            if (to && from && to.p !== from.p) {
+                return {
+                    t: to.t || 0,
+                    from: from.p,
+                    to: to.p,
+                    pct: from.p ? ((to.p - from.p) / from.p) * 100 : 0,
+                };
+            }
+        }
+        return null;
     }
     /** Fallback for products whose stored name is missing/blank/invisible. */
     function displayName(key, p) {
@@ -662,6 +684,7 @@
 
         const changed = !!(last && last.p !== info.price);
         try { noteLivePrice(key, product, changed); } catch (e) { warn('watch state update failed', e); }
+        if (changed) refreshDashboardIfOpen();
 
         let dropPercent = null;
         if (last && info.price < last.p) dropPercent = ((last.p - info.price) / last.p) * 100;
@@ -981,7 +1004,7 @@
         const host = hostOf(key, product);
         const meta = ensureWatchMeta(state, key, false);
         const url = product.url;
-        if (!/^https?:/i.test(url || '')) return false;
+        if (!/^https?:/i.test(url || '')) return { ok: false, changed: false };
 
         let res;
         try {
@@ -991,7 +1014,7 @@
             meta.nextCheck = Date.now() + 15 * MIN_MS;
             noteHostFailure(state, host, 10 * MIN_MS);
             warn('Smart watch fetch failed:', url, e.message);
-            return false;
+            return { ok: false, changed: false };
         }
 
         const now = Date.now();
@@ -1003,7 +1026,7 @@
             meta.etag = res.headers['etag'] || meta.etag;
             meta.lastModified = res.headers['last-modified'] || meta.lastModified;
             meta.nextCheck = now + watchNextDelay(key, product, meta, false, canaries);
-            return true;
+            return { ok: true, changed: false };
         }
 
         if (res.status === 403 || res.status === 429 || res.status >= 500) {
@@ -1015,13 +1038,13 @@
             meta.failures = (meta.failures || 0) + 1;
             meta.nextCheck = until;
             warn('Smart watch blocked:', url, 'HTTP ' + res.status);
-            return false;
+            return { ok: false, changed: false };
         }
 
         if (res.status < 200 || res.status >= 300) {
             meta.failures = (meta.failures || 0) + 1;
             meta.nextCheck = noteHostFailure(state, host, 30 * MIN_MS);
-            return false;
+            return { ok: false, changed: false };
         }
 
         const doc = new DOMParser().parseFromString(res.text, 'text/html');
@@ -1034,11 +1057,11 @@
             );
             noteHostFailure(state, host, 30 * MIN_MS);
             warn('Smart watch: no price found at', url);
-            return false;
+            return { ok: false, changed: false };
         }
 
         const applied = applyWatchedPrice(key, info, doc, url);
-        if (!applied) return false;
+        if (!applied) return { ok: false, changed: false };
 
         noteHostSuccess(state, host);
         meta.lastCheck = now;
@@ -1070,7 +1093,7 @@
                 );
             }
         }
-        return true;
+        return { ok: true, changed: !!applied.changed };
     }
 
     // ── Scheduling ───────────────────────────────────────────────
@@ -1174,8 +1197,10 @@
         budget.used += 1;
         saveWatchState(state);
 
+        let changed = false;
         try {
-            await checkWatchedProduct(candidate.key, candidate.product, state, canaries);
+            const result = await checkWatchedProduct(candidate.key, candidate.product, state, canaries);
+            changed = !!(result && result.changed);
         } catch (e) {
             warn('Smart watch check crashed:', e.message);
         } finally {
@@ -1183,7 +1208,8 @@
             state.lease = null;
             saveWatchState(state);
             updateTrackedBadge();
-            renderWatchStatus();
+            if (changed) refreshDashboardIfOpen();
+            else renderWatchStatus();
         }
     }
 
@@ -1926,7 +1952,7 @@
     }
 
     function openTrackedModal() {
-        if (document.getElementById(CONFIG.trackedModalId)) { renderTrackedModal(); return; }
+        if (document.getElementById(CONFIG.trackedModalId)) { renderTrackedModal(true); return; }
         const modal = document.createElement('div');
         modal.id = CONFIG.trackedModalId;
         modal.innerHTML = `
@@ -2069,6 +2095,21 @@
                 letter-spacing: .3px;
             }
             #${CONFIG.trackedModalId} .jtm-tag.ali { background: #ff4747; }
+            #${CONFIG.trackedModalId} .jtm-flag {
+                flex: 0 0 auto; display: inline-block;
+                font-size: 9px; font-weight: 700; font-family: ui-monospace, Menlo, monospace;
+                border-radius: 3px; padding: 1px 4px; margin-right: 5px;
+                letter-spacing: .2px; white-space: nowrap;
+            }
+            #${CONFIG.trackedModalId} .jtm-flag.down {
+                color: #0f7434; background: #e7f6ec; border: 1px solid #bfe6cb;
+            }
+            #${CONFIG.trackedModalId} .jtm-flag.up {
+                color: #b00; background: #fdecec; border: 1px solid #efc4c4;
+            }
+            #${CONFIG.trackedModalId} .jtm-row.changed { background: #fffdf8; }
+            #${CONFIG.trackedModalId} .jtm-row.changed.down { background: #f7fcf8; }
+            #${CONFIG.trackedModalId} .jtm-row.changed:hover { background: #fff7ec; }
             #${CONFIG.trackedModalId} .jtm-cell {
                 font-family: ui-monospace, Menlo, monospace; font-size: 12px; color: #444;
                 min-width: 66px; text-align: right;
@@ -2166,7 +2207,7 @@
             }
             const r = mergeHistoryData(data);
             importWrap.classList.remove('show');
-            renderTrackedModal();
+            renderTrackedModal(true);
             updateTrackedBadge();
             alert(`Merged ${r.products} new product(s) and ${r.samples} price sample(s).`);
         });
@@ -2187,7 +2228,7 @@
             const r = await backfillImages(30);
             backfillBtn.disabled = false;
             backfillBtn.textContent = 'Fetch images';
-            renderTrackedModal();
+            renderTrackedModal(true);
             updateTrackedBadge();
             if (r.total === 0) {
                 alert('All tracked products already have an image.');
@@ -2208,7 +2249,7 @@
             if (!confirm('Stop tracking this product?')) return;
             const h = loadHistory(); delete h[key]; saveHistory(h);
             resetWatchMeta(key);
-            renderTrackedModal(); updateTrackedBadge();
+            renderTrackedModal(true); updateTrackedBadge();
         });
 
         const watchCb = modal.querySelector('.jtm-watch-cb');
@@ -2220,7 +2261,7 @@
             try { await smartWatchTick(true); }
             finally {
                 watchNow.textContent = 'Check now';
-                renderTrackedModal();
+                renderTrackedModal(true);
                 updateTrackedBadge();
             }
         });
@@ -2228,12 +2269,23 @@
         renderTrackedModal();
     }
 
-    function renderTrackedModal() {
+    /** Re-renders the dashboard list in place, if it is open. */
+    function refreshDashboardIfOpen() {
+        if (!document.getElementById(CONFIG.trackedModalId)) return false;
+        renderTrackedModal(true);
+        return true;
+    }
+
+    function renderTrackedModal(preserve = false) {
         const modal = document.getElementById(CONFIG.trackedModalId);
         if (!modal) return;
         const body = modal.querySelector('.jtm-body');
         const countEl = modal.querySelector('.jtm-count');
+        const prevSearch = preserve ? (modal.querySelector('.jtm-search')?.value || '') : '';
+        const prevSort = preserve ? (modal.querySelector('.jtm-sort')?.value || 'recent') : 'recent';
+        const prevScroll = preserve ? body.scrollTop : 0;
         const history = loadHistory();
+        const now = Date.now();
 
         const rows = Object.entries(history).map(([key, p]) => {
             const ps = p.samples.map(s => s.p);
@@ -2243,7 +2295,11 @@
             const high = Math.max(...ps);
             const change = first ? ((cur - first) / first) * 100 : 0;
             const lastT = p.samples.at(-1)?.t || 0;
-            return { key, p, cur, low, high, change, lastT };
+            const moved = latestChange(p);
+            return {
+                key, p, cur, low, high, change, lastT, moved,
+                recentChange: !!moved && now - moved.t <= CONFIG.watch.changeHighlightMs,
+            };
         }).sort((a, b) => b.lastT - a.lastT);
 
         countEl.textContent = `(${rows.length})`;
@@ -2258,6 +2314,7 @@
                 <input type="search" class="jtm-search" placeholder="Filter by name…" />
                 <select class="jtm-sort">
                     <option value="recent">Recent</option>
+                    <option value="changed">Recent changes</option>
                     <option value="change-down">Biggest drop</option>
                     <option value="change-up">Biggest rise</option>
                     <option value="price-low">Lowest price</option>
@@ -2270,13 +2327,16 @@
         const list = body.querySelector('.jtm-list');
         const search = body.querySelector('.jtm-search');
         const sortSel = body.querySelector('.jtm-sort');
+        search.value = prevSearch;
+        sortSel.value = prevSort;
 
         function renderList() {
             let view = rows.slice();
             const q = search.value.trim().toLowerCase();
             if (q) view = view.filter(r => displayName(r.key, r.p).toLowerCase().includes(q));
             const s = sortSel.value;
-            if (s === 'change-down') view.sort((a, b) => a.change - b.change);
+            if (s === 'changed') view.sort((a, b) => (b.moved?.t || 0) - (a.moved?.t || 0) || b.lastT - a.lastT);
+            else if (s === 'change-down') view.sort((a, b) => a.change - b.change);
             else if (s === 'change-up') view.sort((a, b) => b.change - a.change);
             else if (s === 'price-low') view.sort((a, b) => a.cur - b.cur);
             else if (s === 'price-high') view.sort((a, b) => b.cur - a.cur);
@@ -2295,8 +2355,16 @@
                 const atTarget = target != null && r.cur != null && r.cur <= target;
                 const targetCls = target != null ? (atTarget ? ' set met' : ' set') : '';
                 const targetText = target != null ? formatMoney(target, code) : '🎯 set';
+                const moved = r.recentChange ? r.moved : null;
+                const movedDir = moved && moved.pct < 0 ? 'down' : 'up';
+                const movedFlag = moved
+                    ? `<span class="jtm-flag ${movedDir}" title="Changed ${timeAgo(moved.t)}: ${
+                        formatMoney(moved.from, code)} → ${formatMoney(moved.to, code)}">${
+                        movedDir === 'down' ? '↓' : '↑'}${Math.abs(moved.pct).toFixed(1)}%</span>`
+                    : '';
+                const rowCls = moved ? ` changed ${movedDir}` : '';
                 return `
-                    <div class="jtm-row">
+                    <div class="jtm-row${rowCls}">
                         <div class="jtm-name" title="${escapeHtml(label)}">
                             <span class="jtm-thumb${image ? '' : ' jtm-thumb-empty'}">${
                                 image
@@ -2305,6 +2373,7 @@
                             }</span>
                             <span class="jtm-name-main">
                                 <span class="jtm-tag ${isAli ? 'ali' : ''}">${tag}</span>
+                                ${movedFlag}
                                 <span class="jtm-name-text">${escapeHtml(truncate(label, 60))}</span>
                             </span>
                             <a class="jtm-name-link" href="${escapeHtml(r.p.url)}" target="_blank" rel="noopener" aria-label="${escapeHtml(label)}"></a>
@@ -2321,6 +2390,7 @@
         search.addEventListener('input', renderList);
         sortSel.addEventListener('change', renderList);
         renderList();
+        body.scrollTop = prevScroll;
         renderWatchStatus();
     }
 

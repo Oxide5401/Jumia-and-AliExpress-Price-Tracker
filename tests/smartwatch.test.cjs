@@ -331,6 +331,75 @@ test('import merges a target price into existing history', async () => {
     assert.strictEqual(h[key].target, 88, 'target merged');
 });
 
+// ── 8. A background change refreshes an open dashboard and flags the row ─
+test('background price change updates and highlights the open dashboard', async () => {
+    const alpha = 'alpha', beta = 'beta';
+    const alphaUrl = 'https://www.jumia.com.gh/alpha.html';
+    const betaUrl = 'https://www.jumia.com.gh/beta.html';
+    const history = {
+        [alpha]: {
+            name: 'Alpha Phone', url: alphaUrl, site: 'jumia', currency: 'GHS',
+            samples: [{ p: 100, t: realNow - 3 * HOUR }], created: realNow - 9 * DAY,
+        },
+        [beta]: {
+            name: 'Beta Case', url: betaUrl, site: 'jumia', currency: 'GHS',
+            samples: [{ p: 80, t: realNow - 2 * HOUR }], created: realNow - 9 * DAY,
+        },
+    };
+    const metas = {
+        [alpha]: { lastCheck: realNow - 9 * HOUR, nextCheck: 0, misses: 0, failures: 0, etag: null, lastModified: null, lastPrice: 100, rechecksLeft: 0 },
+        [beta]: { lastCheck: realNow - 9 * HOUR, nextCheck: realNow + 60000, misses: 0, failures: 0, etag: null, lastModified: null, lastPrice: 80, rechecksLeft: 0 },
+    };
+    const storage = {
+        ...seedHistory(history),
+        [WATCH_KEY]: true,
+        [STATE_KEY]: JSON.stringify(stateWith(metas)),
+        jumia_gh_coupons_last_fetch: realNow,
+    };
+    const env = await makeEnv({
+        storage,
+        responses: {
+            [alphaUrl]: { status: 200, text: page(90, 'Alpha Phone', alphaUrl) },
+            [betaUrl]: { status: 200, text: page(70, 'Beta Case', betaUrl) },
+        },
+    });
+    await openDashboard(env);
+
+    const doc = env.win.document;
+    const names = () => [...doc.querySelectorAll('.jtm-row .jtm-name-text')].map(e => e.textContent);
+    assert.deepStrictEqual(names(), ['Beta Case', 'Alpha Phone'], 'default Recent sort before the check');
+
+    // First tick changes alpha (100 → 90); the dashboard is already open.
+    await runDue(env, 20000);
+
+    assert(doc.getElementById('price-tracker-modal'), 'dashboard stays open');
+    assert.deepStrictEqual(names(), ['Alpha Phone', 'Beta Case'], 'changed product rises to the top');
+    const alphaRow = doc.querySelector('.jtm-row.changed');
+    assert(alphaRow, 'changed row is tinted');
+    assert(alphaRow.classList.contains('down'), 'a drop is styled as down');
+    const flag = alphaRow.querySelector('.jtm-flag.down');
+    assert(flag, 'a change badge is rendered');
+    assert(/10\.0%/.test(flag.textContent), 'badge shows the movement, got ' + flag.textContent);
+    assert(/Alpha Phone/.test(alphaRow.textContent), 'badge belongs to the changed product');
+
+    // Filter/sort choices survive the auto-refresh.
+    const search = doc.querySelector('.jtm-search');
+    search.value = 'Beta';
+    search.dispatchEvent(new env.win.Event('input'));
+    const sortSel = doc.querySelector('.jtm-sort');
+    sortSel.value = 'changed';
+    sortSel.dispatchEvent(new env.win.Event('change'));
+
+    // Second tick changes beta (80 → 70); state must be preserved.
+    await runDue(env, 7 * 60 * 1000);
+
+    assert.strictEqual(doc.querySelector('.jtm-search').value, 'Beta', 'search text preserved');
+    assert.strictEqual(doc.querySelector('.jtm-sort').value, 'changed', 'sort preserved');
+    assert.deepStrictEqual(names(), ['Beta Case'], 'filter still applied after refresh');
+    const betaFlag = doc.querySelector('.jtm-row.changed .jtm-flag.down');
+    assert(betaFlag && /12\.5%/.test(betaFlag.textContent), 'beta badge shows the new movement');
+});
+
 (async () => {
     let failed = 0;
     for (const t of tests) {
