@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jumia Ghana – Price Tracker + Coupons + Dashboard
 // @namespace    https://github.com/yourname/jumia-price-tracker
-// @version      3.6.0
+// @version      3.7.0
 // @description  Robust price tracker with product images, persistent coupon finder, and tracking dashboard for jumia.com.gh and aliexpress.com (Ghana / GHS)
 // @author       Oxide5401
 // @homepageURL  https://github.com/Oxide5401/Jumia-and-AliExpress-Price-Tracker
@@ -90,6 +90,7 @@
         dropThresholdPercent: 5,
         uiPanelId: 'price-tracker-panel',
         trackedModalId: 'price-tracker-modal',
+        dashWindowKey: 'jumia_gh_dash_window',
         notificationTimeout: 10000,
         couponPageUrls: SITE.couponPageUrls,
         couponCacheTTLMs: 6 * 60 * 60 * 1000,
@@ -1961,10 +1962,15 @@
         modal.innerHTML = `
             <div class="jtm-backdrop"></div>
             <div class="jtm-content">
-                <div class="jtm-header">
+                <div class="jtm-header" title="Drag to move · double-click to maximize · hold Alt to bypass edge snapping">
                     <span>📊 Tracked Products</span>
                     <span class="jtm-count"></span>
-                    <button class="jtm-close">×</button>
+                    <div class="jtm-window-controls">
+                        <button class="jtm-win jtm-snap" type="button" title="Snap to edges: on" aria-label="Toggle snap to edges" aria-pressed="true">🧲</button>
+                        <button class="jtm-win jtm-min" type="button" title="Minimize" aria-label="Minimize">–</button>
+                        <button class="jtm-win jtm-max-btn" type="button" title="Maximize" aria-label="Maximize">▢</button>
+                        <button class="jtm-win jtm-close" type="button" title="Close" aria-label="Close">×</button>
+                    </div>
                 </div>
                 <div class="jtm-watch">
                     <label class="jtm-watch-toggle" title="Background checks run only while a Jumia/AliExpress tab is open.">
@@ -1989,6 +1995,7 @@
                         <button class="jtm-import-cancel">Cancel</button>
                     </div>
                 </div>
+                <div class="jtm-resize" title="Drag to resize"></div>
             </div>
         `;
         document.body.appendChild(modal);
@@ -1998,8 +2005,8 @@
                 position: fixed; inset: 0; background: rgba(0,0,0,.45); z-index: 100000;
             }
             #${CONFIG.trackedModalId} .jtm-content {
-                position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
-                width: min(720px, 92vw); max-height: 80vh;
+                position: fixed; top: 0; left: 0;
+                width: min(720px, 92vw); height: 80vh;
                 background: #fff; border-radius: 10px; z-index: 100001;
                 display: flex; flex-direction: column; overflow: hidden;
                 font-family: system-ui, -apple-system, sans-serif; font-size: 13px;
@@ -2007,17 +2014,50 @@
                 color: #333;
                 color-scheme: only light;
             }
+            #${CONFIG.trackedModalId} .jtm-content.jtm-max { border-radius: 0; }
+            #${CONFIG.trackedModalId} .jtm-content.jtm-snapped {
+                box-shadow: 0 0 0 2px rgba(255,106,0,.4), 0 12px 32px rgba(0,0,0,.25);
+            }
+            #${CONFIG.trackedModalId} .jtm-content.jtm-dragging { user-select: none; }
             #${CONFIG.trackedModalId} .jtm-header {
+                flex: 0 0 auto;
                 display: flex; align-items: center; gap: 10px;
-                padding: 12px 16px; background: #f5f5f5; border-bottom: 1px solid #ddd;
+                padding: 10px 12px 10px 16px; background: #f5f5f5; border-bottom: 1px solid #ddd;
                 font-weight: 700; font-size: 14px;
+                cursor: grab; user-select: none; touch-action: none;
             }
+            #${CONFIG.trackedModalId} .jtm-content.jtm-dragging .jtm-header { cursor: grabbing; }
             #${CONFIG.trackedModalId} .jtm-count { color: #888; font-weight: 500; font-size: 12px; }
-            #${CONFIG.trackedModalId} .jtm-close {
-                margin-left: auto; background: none; border: none;
-                font-size: 22px; line-height: 1; cursor: pointer; color: #999;
+            #${CONFIG.trackedModalId} .jtm-window-controls {
+                margin-left: auto; display: flex; align-items: center; gap: 2px;
             }
-            #${CONFIG.trackedModalId} .jtm-close:hover { color: #333; }
+            #${CONFIG.trackedModalId} .jtm-win {
+                width: 27px; height: 24px; padding: 0;
+                display: inline-flex; align-items: center; justify-content: center;
+                background: none; border: none; border-radius: 4px;
+                color: #777; font: inherit; font-size: 15px; line-height: 1;
+                cursor: pointer;
+            }
+            #${CONFIG.trackedModalId} .jtm-win:hover { background: #e6e6e6; color: #222; }
+            #${CONFIG.trackedModalId} .jtm-win.jtm-snap { font-size: 13px; }
+            #${CONFIG.trackedModalId} .jtm-win.jtm-snap[aria-pressed="true"] { background: #fff1e3; }
+            #${CONFIG.trackedModalId} .jtm-win.jtm-snap[aria-pressed="false"] { opacity: .45; }
+            #${CONFIG.trackedModalId} .jtm-win.jtm-close { font-size: 22px; }
+            #${CONFIG.trackedModalId} .jtm-win.jtm-close:hover { background: #e81123; color: #fff; }
+            #${CONFIG.trackedModalId} .jtm-content.jtm-minimized { height: auto !important; }
+            #${CONFIG.trackedModalId} .jtm-content.jtm-minimized .jtm-watch,
+            #${CONFIG.trackedModalId} .jtm-content.jtm-minimized .jtm-body,
+            #${CONFIG.trackedModalId} .jtm-content.jtm-minimized .jtm-footer,
+            #${CONFIG.trackedModalId} .jtm-content.jtm-minimized .jtm-import-wrap { display: none !important; }
+            #${CONFIG.trackedModalId} .jtm-content.jtm-minimized .jtm-header { border-bottom: none; }
+            #${CONFIG.trackedModalId} .jtm-resize {
+                position: absolute; right: 0; bottom: 0; width: 16px; height: 16px;
+                z-index: 3; cursor: nwse-resize; touch-action: none;
+                background: repeating-linear-gradient(135deg, transparent 0 3px, #cfcfcf 3px 4px);
+                clip-path: polygon(100% 0, 100% 100%, 0 100%);
+                opacity: .9;
+            }
+            #${CONFIG.trackedModalId} .jtm-content.jtm-max .jtm-resize { display: none; }
             #${CONFIG.trackedModalId} .jtm-body { flex: 1; overflow-y: auto; padding: 10px 16px; }
             #${CONFIG.trackedModalId} .jtm-watch {
                 display: flex; align-items: center; gap: 10px;
@@ -2180,8 +2220,236 @@
             #${CONFIG.trackedModalId} .jtm-import-actions .jtm-import-ok:hover { background: #0f7434; }
         `);
 
-        modal.querySelector('.jtm-backdrop').addEventListener('click', () => modal.remove());
-        modal.querySelector('.jtm-close').addEventListener('click', () => modal.remove());
+        // ── Dashboard window: drag, resize, snap, minimize, maximize ──
+        // Geometry is stored in viewport pixels. Only the normal (restored)
+        // rectangle is persisted; `max` records whether it opens maximized.
+        const content = modal.querySelector('.jtm-content');
+        const header = modal.querySelector('.jtm-header');
+        const grip = modal.querySelector('.jtm-resize');
+        const minBtn = modal.querySelector('.jtm-min');
+        const maxBtn = modal.querySelector('.jtm-max-btn');
+        const snapBtn = modal.querySelector('.jtm-snap');
+        const SNAP_PX = 18;
+        const cleanups = [];
+        let normalRect = null;
+        let maximized = false;
+        let minimized = false;
+        let snapEnabled = true;
+
+        const viewport = () => ({
+            w: Math.max(320, window.innerWidth || document.documentElement.clientWidth || 1024),
+            h: Math.max(240, window.innerHeight || document.documentElement.clientHeight || 768),
+        });
+        const minSize = () => {
+            const vp = viewport();
+            return { w: Math.min(360, vp.w - 8), h: Math.min(240, vp.h - 8) };
+        };
+        const snapAxis = (pos, size, limit, alt) => {
+            if (alt) return pos;
+            if (Math.abs(pos) <= SNAP_PX) return 0;
+            if (Math.abs(limit - (pos + size)) <= SNAP_PX) return limit - size;
+            return pos;
+        };
+        const isSnapped = r => {
+            const vp = viewport();
+            return r.x <= 0.5 || r.y <= 0.5 ||
+                r.x + r.w >= vp.w - 0.5 || r.y + r.h >= vp.h - 0.5;
+        };
+        const defaultRect = () => {
+            const vp = viewport();
+            const w = Math.min(720, Math.round(vp.w * 0.92));
+            const h = Math.min(Math.round(vp.h * 0.8), 820);
+            return { w, h, x: Math.round((vp.w - w) / 2), y: Math.round((vp.h - h) / 2) };
+        };
+        const clampRect = r => {
+            const vp = viewport();
+            const min = minSize();
+            const w = Math.max(min.w, Math.min(r.w, vp.w));
+            const h = Math.max(min.h, Math.min(r.h, vp.h));
+            return {
+                w, h,
+                x: Math.max(0, Math.min(r.x, vp.w - w)),
+                y: Math.max(0, Math.min(r.y, vp.h - h)),
+            };
+        };
+        const paint = () => {
+            const vp = viewport();
+            content.classList.toggle('jtm-minimized', minimized);
+            content.classList.toggle('jtm-max', maximized);
+            if (maximized) {
+                content.style.left = '0px';
+                content.style.top = '0px';
+                content.style.width = vp.w + 'px';
+                content.style.height = minimized ? '' : vp.h + 'px';
+                content.classList.remove('jtm-snapped');
+                return;
+            }
+            normalRect = clampRect(normalRect);
+            content.style.left = Math.round(normalRect.x) + 'px';
+            content.style.top = Math.round(normalRect.y) + 'px';
+            content.style.width = Math.round(normalRect.w) + 'px';
+            content.style.height = minimized ? '' : Math.round(normalRect.h) + 'px';
+        };
+        const persist = () => {
+            if (!normalRect) return;
+            try {
+                GM_setValue(CONFIG.dashWindowKey, JSON.stringify({
+                    x: Math.round(normalRect.x), y: Math.round(normalRect.y),
+                    w: Math.round(normalRect.w), h: Math.round(normalRect.h),
+                    max: maximized,
+                    snap: snapEnabled,
+                }));
+            } catch (e) { warn('Could not save dashboard window geometry:', e.message); }
+        };
+        const readSaved = () => {
+            try {
+                const raw = GM_getValue(CONFIG.dashWindowKey, '');
+                const o = typeof raw === 'string' ? JSON.parse(raw) : raw;
+                if (!o || typeof o !== 'object') return null;
+                if (!['x', 'y', 'w', 'h'].every(k => typeof o[k] === 'number' && isFinite(o[k]))) return null;
+                return o;
+            } catch { return null; }
+        };
+        const updateWinButtons = () => {
+            minBtn.textContent = minimized ? '▣' : '–';
+            minBtn.title = minimized ? 'Restore' : 'Minimize';
+            minBtn.setAttribute('aria-label', minBtn.title);
+            maxBtn.textContent = maximized ? '❐' : '▢';
+            maxBtn.title = maximized ? 'Restore' : 'Maximize';
+            maxBtn.setAttribute('aria-label', maxBtn.title);
+        };
+        const updateSnapBtn = () => {
+            snapBtn.setAttribute('aria-pressed', String(snapEnabled));
+            snapBtn.title = `Snap to edges: ${snapEnabled ? 'on' : 'off'}`;
+        };
+        const closeModal = () => {
+            while (cleanups.length) {
+                try { cleanups.pop()(); } catch { /* ignore */ }
+            }
+            persist();
+            modal.remove();
+        };
+        const listen = (target, type, fn, opts) => {
+            target.addEventListener(type, fn, opts);
+            const off = () => target.removeEventListener(type, fn, opts);
+            cleanups.push(off);
+            return off;
+        };
+        const setMinimized = v => { minimized = v; paint(); updateWinButtons(); };
+        const setMaximized = v => {
+            maximized = v;
+            if (v) minimized = false;
+            paint();
+            updateWinButtons();
+            persist();
+        };
+
+        const saved = readSaved();
+        normalRect = saved
+            ? clampRect({ x: saved.x, y: saved.y, w: saved.w, h: saved.h })
+            : defaultRect();
+        maximized = !!(saved && saved.max);
+        minimized = false;
+        snapEnabled = !(saved && saved.snap === false);
+        paint();
+        updateWinButtons();
+        updateSnapBtn();
+
+        header.addEventListener('pointerdown', e => {
+            if (e.button !== 0) return;
+            if (e.target.closest('button, input, select, textarea, a')) return;
+            e.preventDefault();
+            if (maximized) {
+                // Dragging a maximized window restores it under the pointer.
+                const vp = viewport();
+                setMaximized(false);
+                setMinimized(false);
+                normalRect.x = Math.max(0, Math.min(e.clientX - normalRect.w / 2, vp.w - normalRect.w));
+                normalRect.y = Math.max(0, Math.min(e.clientY - 16, vp.h - normalRect.h));
+                paint();
+            }
+            const vp = viewport();
+            const start = { px: e.clientX, py: e.clientY, x: normalRect.x, y: normalRect.y, w: normalRect.w, h: normalRect.h };
+            content.classList.add('jtm-dragging');
+            try { header.setPointerCapture(e.pointerId); } catch { /* optional */ }
+            const move = ev => {
+                let x = start.x + (ev.clientX - start.px);
+                let y = start.y + (ev.clientY - start.py);
+                x = snapAxis(x, start.w, vp.w, !snapEnabled || ev.altKey);
+                y = snapAxis(y, start.h, vp.h, !snapEnabled || ev.altKey);
+                normalRect.x = Math.max(0, Math.min(x, Math.max(0, vp.w - start.w)));
+                normalRect.y = Math.max(0, Math.min(y, Math.max(0, vp.h - start.h)));
+                paint();
+                content.classList.toggle('jtm-snapped', snapEnabled && !ev.altKey && isSnapped(normalRect));
+            };
+            const up = () => {
+                content.classList.remove('jtm-dragging');
+                try { header.releasePointerCapture(e.pointerId); } catch { /* optional */ }
+                offMove();
+                offUp();
+                persist();
+            };
+            const offMove = listen(window, 'pointermove', move);
+            const offUp = listen(window, 'pointerup', up);
+        });
+
+        header.addEventListener('dblclick', e => {
+            if (e.target.closest('button, input, select, textarea, a')) return;
+            if (minimized) { setMinimized(false); return; }
+            setMaximized(!maximized);
+        });
+
+        grip.addEventListener('pointerdown', e => {
+            if (e.button !== 0 || maximized) return;
+            e.preventDefault();
+            const start = { px: e.clientX, py: e.clientY, w: normalRect.w, h: normalRect.h };
+            content.classList.add('jtm-dragging');
+            try { grip.setPointerCapture(e.pointerId); } catch { /* optional */ }
+            const move = ev => {
+                const vp = viewport();
+                const min = minSize();
+                let w = Math.max(min.w, start.w + (ev.clientX - start.px));
+                let h = Math.max(min.h, start.h + (ev.clientY - start.py));
+                w = Math.min(w, vp.w - normalRect.x);
+                h = Math.min(h, vp.h - normalRect.y);
+                if (snapEnabled && !ev.altKey) {
+                    if (Math.abs((normalRect.x + w) - vp.w) <= SNAP_PX) w = vp.w - normalRect.x;
+                    if (Math.abs((normalRect.y + h) - vp.h) <= SNAP_PX) h = vp.h - normalRect.y;
+                }
+                normalRect.w = w;
+                normalRect.h = h;
+                paint();
+                content.classList.toggle('jtm-snapped', snapEnabled && !ev.altKey && isSnapped(normalRect));
+            };
+            const up = () => {
+                content.classList.remove('jtm-dragging');
+                try { grip.releasePointerCapture(e.pointerId); } catch { /* optional */ }
+                offMove();
+                offUp();
+                persist();
+            };
+            const offMove = listen(window, 'pointermove', move);
+            const offUp = listen(window, 'pointerup', up);
+        });
+
+        minBtn.addEventListener('click', () => setMinimized(!minimized));
+        maxBtn.addEventListener('click', () => setMaximized(!maximized));
+        snapBtn.addEventListener('click', () => {
+            snapEnabled = !snapEnabled;
+            if (!snapEnabled) content.classList.remove('jtm-snapped');
+            updateSnapBtn();
+            persist();
+        });
+        listen(window, 'resize', () => {
+            if (!maximized) normalRect = clampRect(normalRect);
+            paint();
+        });
+        listen(document, 'keydown', e => {
+            if (e.key === 'Escape') closeModal();
+        });
+
+        modal.querySelector('.jtm-backdrop').addEventListener('click', closeModal);
+        modal.querySelector('.jtm-close').addEventListener('click', closeModal);
         modal.querySelector('.jtm-clear-all').addEventListener('click', () => {
             if (confirm('Delete ALL tracked products and their price history (Jumia + AliExpress)?')) {
                 GM_setValue(CONFIG.storageKey, '{}');

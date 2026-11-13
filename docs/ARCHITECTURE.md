@@ -314,6 +314,16 @@ Web sync honours `CONFIG.couponCacheTTLMs` (6 hours) unless forced by **Find Cou
 - A capture-phase `error` listener on the modal swaps broken images for the placeholder (image `error` events do not bubble).
 - Footer actions: Export, Import (merge), Fetch images, Clear All.
 
+#### Window geometry (`openTrackedModal`)
+
+The modal is a floating window rather than a centered dialog:
+
+- Geometry lives in viewport pixels on `.jtm-content` (`left`, `top`, `width`, `height`). `normalRect` always holds the restored rectangle; `maximized` and `minimized` are separate flags so restoring from either state is predictable.
+- Dragging uses pointer events on `.jtm-header`; resizing uses the `.jtm-resize` grip. Both listen on `window` for the move/up phases and are registered through a tracked `listen` helper so closing the modal cannot leak handlers.
+- Snapping uses `SNAP_PX` (18 px): `snapAxis` pulls a coordinate flush when either edge is within the threshold. Dragging and resizing both run `clampRect` first, so the window can never be lost off-screen. `Alt` bypasses snapping; the 🧲 button persists a global snap preference (`snap`).
+- `jumia_gh_dash_window` stores `{ x, y, w, h, max, snap }`. Only the normal rectangle is stored while maximized, so un-maximizing restores the previous size. On open, geometry is clamped to the current viewport, which handles monitor and window-size changes.
+- A `resize` listener re-clamps the window or refreshes the maximized size. `Escape` closes the window, and `closeModal` removes every tracked listener before detaching the modal.
+
 ### Escaping
 All page/history-derived strings pass through `escapeHtml` before interpolation into template strings. Image URLs are attribute-escaped and scheme-filtered at capture time.
 

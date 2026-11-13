@@ -129,6 +129,9 @@ These are the assertions worth keeping when changing extraction, storage, or UI.
 - Target button shows `🎯 set` when unset, the formatted target when set, and a green `.met` state at/below target.
 - A movement within 7 days renders a `.jtm-flag.down|up` badge with the percentage, and the row gains `.jtm-row.changed`. Older movement shows no badge.
 - `latestChange` ignores a later unchanged sample and still reports the earlier movement.
+- The dashboard exposes `.jtm-min`, `.jtm-max-btn`, `.jtm-close`, `.jtm-snap`, and `.jtm-resize`. Dragging within `SNAP_PX` of an edge snaps flush and adds `.jtm-snapped`; Alt bypasses snapping; the 🧲 toggle disables it.
+- Maximize fills the viewport, restore returns to the previous rectangle, minimize collapses to the title bar, and closing removes the modal.
+- Dragging/resizing persists `{ x, y, w, h, max, snap }` to `jumia_gh_dash_window`; reopening restores it.
 
 ### Smart watch
 - **304:** a stored `ETag` is sent as `If-None-Match`; a `304` adds no sample, increments misses, and pushes `nextCheck` forward.
@@ -183,6 +186,11 @@ The UI must remain readable.
 - [ ] Refresh twice: samples increment, low/high/change update.
 - [ ] Visit a different product: new entry, no duplicate samples for the first.
 - [ ] Open dashboard: rows sort/filter, delete works, Export copies JSON.
+- [ ] Drag the dashboard by its title bar: it follows the pointer and snaps flush when released near an edge (orange outline).
+- [ ] Toggle **🧲** off: the window no longer snaps; toggle it on again. Hold **Alt** during a drag: it bypasses snapping even when enabled.
+- [ ] Resize from the bottom-right grip: the window respects a minimum size and snaps to the right/bottom edges.
+- [ ] Minimize → only the title bar remains; restore. Maximize → full viewport; restore. Double-click the title bar also toggles maximize.
+- [ ] Close with × and with Escape. Reopen: position, size, maximized state, and snap preference are restored.
 - [ ] Change price via DevTools before Refresh: drop notification fires at ≥5%.
 - [ ] Coupons: **Find Coupons** populates the list; clicking a code copies it; **all** toggles.
 - [ ] **Fetch images** fills thumbnails for products without images; a second click resumes.

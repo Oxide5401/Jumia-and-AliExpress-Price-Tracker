@@ -427,6 +427,110 @@ test('returning to the tab refreshes the dashboard after another tab changed a p
     assert(/88/.test(row.querySelector('.jtm-cur').textContent), 'current price re-read');
 });
 
+// ── 10. Dashboard window controls: drag, snap, maximize, minimize, close ─
+test('dashboard window controls drag, snap, maximize, minimize and persist geometry', async () => {
+    const key = 'p1';
+    const url = 'https://www.jumia.com.gh/p1.html';
+    const history = {
+        [key]: { name: 'One', url, site: 'jumia', currency: 'GHS', samples: [{ p: 100, t: realNow - HOUR }], created: realNow - DAY },
+    };
+    const storage = { ...seedHistory(history), jumia_gh_coupons_last_fetch: realNow };
+    const env = await makeEnv({ storage });
+    Object.defineProperty(env.win, 'innerWidth', { value: 1000, configurable: true });
+    Object.defineProperty(env.win, 'innerHeight', { value: 700, configurable: true });
+    await openDashboard(env);
+
+    const doc = env.win.document;
+    const content = doc.querySelector('.jtm-content');
+    assert(content, 'window exists');
+    for (const sel of ['.jtm-min', '.jtm-max-btn', '.jtm-close', '.jtm-resize']) {
+        assert(doc.querySelector(sel), sel + ' control exists');
+    }
+    assert.strictEqual(content.style.width, '720px', 'default width');
+    assert.strictEqual(content.style.height, '560px', 'default height');
+    assert.strictEqual(content.style.left, '140px', 'centered horizontally');
+    assert.strictEqual(content.style.top, '70px', 'centered vertically');
+
+    const header = doc.querySelector('.jtm-header');
+    const ptr = (type, x, y, extra = {}) => new env.win.MouseEvent(type, {
+        bubbles: true, cancelable: true, clientX: x, clientY: y, button: 0, ...extra,
+    });
+
+    // Drag left; 10px from the edge snaps flush.
+    header.dispatchEvent(ptr('pointerdown', 300, 90));
+    env.win.dispatchEvent(ptr('pointermove', 170, 90));
+    assert.strictEqual(content.style.left, '0px', 'snaps to the left edge');
+    assert(content.classList.contains('jtm-snapped'), 'snap indicator shown');
+    env.win.dispatchEvent(ptr('pointerup', 170, 90));
+    assert.strictEqual(JSON.parse(env.store.get('jumia_gh_dash_window')).x, 0, 'geometry persisted');
+
+    // Holding Alt bypasses snapping for free positioning.
+    header.dispatchEvent(ptr('pointerdown', 300, 90));
+    env.win.dispatchEvent(ptr('pointermove', 312, 90, { altKey: true }));
+    assert.strictEqual(content.style.left, '12px', 'Alt bypasses edge snapping');
+    env.win.dispatchEvent(ptr('pointerup', 312, 90));
+
+    // The magnet toggle turns snapping off entirely, and back on.
+    const snapBtn = doc.querySelector('.jtm-snap');
+    assert.strictEqual(snapBtn.getAttribute('aria-pressed'), 'true', 'snapping defaults to on');
+    snapBtn.click();
+    assert.strictEqual(snapBtn.getAttribute('aria-pressed'), 'false', 'snapping can be turned off');
+    header.dispatchEvent(ptr('pointerdown', 300, 90));
+    env.win.dispatchEvent(ptr('pointermove', 388, 90)); // x = 12 + 88 = 100
+    assert.strictEqual(content.style.left, '100px', 'no snap while disabled');
+    env.win.dispatchEvent(ptr('pointerup', 388, 90));
+    snapBtn.click();
+    assert.strictEqual(snapBtn.getAttribute('aria-pressed'), 'true', 'snapping turned back on');
+    header.dispatchEvent(ptr('pointerdown', 300, 90));
+    env.win.dispatchEvent(ptr('pointermove', 210, 90)); // x = 10 => snap
+    assert.strictEqual(content.style.left, '0px', 'snapping resumes');
+    env.win.dispatchEvent(ptr('pointerup', 210, 90));
+
+    // Maximize fills the viewport; restore returns to the normal rectangle.
+    const maxBtn = doc.querySelector('.jtm-max-btn');
+    maxBtn.click();
+    assert(content.classList.contains('jtm-max'), 'maximized class');
+    assert.strictEqual(content.style.width, '1000px');
+    assert.strictEqual(content.style.height, '700px');
+    assert.strictEqual(content.style.left, '0px');
+    maxBtn.click();
+    assert(!content.classList.contains('jtm-max'), 'restored');
+    assert.strictEqual(content.style.width, '720px');
+    assert.strictEqual(content.style.height, '560px');
+    assert.strictEqual(content.style.left, '0px');
+
+    // Resize from the bottom-right grip; 8px from the right snaps flush.
+    const grip = doc.querySelector('.jtm-resize');
+    grip.dispatchEvent(ptr('pointerdown', 200, 200));
+    env.win.dispatchEvent(ptr('pointermove', 472, 200));
+    assert.strictEqual(content.style.width, '1000px', 'resize snapped to the right edge');
+    env.win.dispatchEvent(ptr('pointerup', 472, 200));
+
+    // Minimize collapses to the title bar and restores.
+    const minBtn = doc.querySelector('.jtm-min');
+    minBtn.click();
+    assert(content.classList.contains('jtm-minimized'), 'minimized class');
+    assert.strictEqual(content.style.height, '', 'height collapses');
+    minBtn.click();
+    assert(!content.classList.contains('jtm-minimized'), 'minimize restored');
+    assert.strictEqual(content.style.height, '560px');
+
+    // Close removes the window.
+    doc.querySelector('.jtm-close').click();
+    assert(!doc.getElementById('price-tracker-modal'), 'window closed');
+    const saved = JSON.parse(env.store.get('jumia_gh_dash_window'));
+    assert.strictEqual(saved.w, 1000);
+    assert.strictEqual(saved.max, false);
+    assert.strictEqual(saved.snap, true);
+
+    // Reopening restores the saved geometry.
+    await openDashboard(env);
+    const reopened = doc.querySelector('.jtm-content');
+    assert.strictEqual(reopened.style.width, '1000px', 'saved width restored');
+    assert.strictEqual(reopened.style.height, '560px', 'saved height restored');
+    assert.strictEqual(reopened.style.left, '0px', 'saved position restored');
+});
+
 (async () => {
     let failed = 0;
     for (const t of tests) {

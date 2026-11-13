@@ -2,6 +2,14 @@
 
 All notable changes to this project are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions use `MAJOR.MINOR.PATCH`.
 
+## [3.7.0] — 2026-11-13
+
+### Added
+- **Dashboard window controls.** The tracked-products window can now be dragged by its title bar, resized from the bottom-right grip, minimized to its title bar, maximized to the full viewport, and restored with the ▢ button or a title-bar double-click.
+- **Smart edge snapping.** While dragging or resizing, the window snaps flush to the nearest screen edge within 18 px, with an orange outline confirming the snap. The **🧲** button toggles snapping; holding **Alt** bypasses it for one move.
+- **Remembered geometry.** Position, size, maximized state, and the snap preference are stored under `jumia_gh_dash_window` and restored on the next open, clamped to the current viewport.
+- Escape now closes the dashboard, and the window stays within the viewport when the browser window is resized.
+
 ## [3.6.0] — 2026-11-13
 
 ### Added

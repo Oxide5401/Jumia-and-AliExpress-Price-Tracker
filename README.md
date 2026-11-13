@@ -2,7 +2,7 @@
 
 A single Tampermonkey/Violentmonkey userscript that tracks product prices on **Jumia Ghana** (`jumia.com.gh`) and **AliExpress** (Ghana shipping, GHS), finds and stores coupon codes, and shows everything in one dashboard — including **product thumbnails**.
 
-![Version](https://img.shields.io/badge/version-3.6.0-orange)
+![Version](https://img.shields.io/badge/version-3.7.0-orange)
 ![License](https://img.shields.io/badge/license-MIT-blue)
 ![Platform](https://img.shields.io/badge/platform-Tampermonkey%20%7C%20Violentmonkey-2ea44f)
 
@@ -86,6 +86,15 @@ A single Tampermonkey/Violentmonkey userscript that tracks product prices on **J
 - `↓` / `↑` badges and a soft tint mark products that moved within the last 7 days.
 - **Export JSON**, merge-safe **Import JSON**, **Fetch images**, and **Clear All**.
 - Works on any page of either site — you do not need to be on a product page.
+
+### Window controls (new in 3.7.0)
+- **Drag** the dashboard by its title bar to move it anywhere.
+- **Smart edge snapping** — release near any screen edge and the window snaps flush, with a short orange outline to confirm. Use the **🧲** button to switch snapping off, or hold **Alt** while dragging to bypass it for one move.
+- **Resize** from the bottom-right grip; sizing also snaps to the right and bottom edges.
+- **Minimize** collapses the window to its title bar so it stays out of the way without closing.
+- **Maximize / restore** with the ▢ button or by double-clicking the title bar.
+- **Close** with × or Escape.
+- Position, size, maximized state, and the snap preference are remembered across reloads and tabs, then clamped on-screen if the window gets smaller.
 
 ### Cross-site behaviour
 - AliExpress is a SPA: a URL watcher detects in-page product changes and records the new item without a reload.
@@ -189,6 +198,7 @@ Open it with the 📊 button in the panel.
 - **Import JSON** — paste an export; **Merge** adds new products/samples and fills missing fields without deleting anything.
 - **Fetch images** — see below.
 - **Clear All** — deletes every tracked product on both sites after confirmation (coupons are kept).
+- **Window controls** — drag by the title bar, snap to screen edges (🧲 toggles it, Alt bypasses it), resize from the bottom-right grip, minimize, maximize/restore, or close with × / Escape. Geometry is remembered.
 
 ### Product images
 
@@ -283,6 +293,7 @@ All data stays in your browser, inside your userscript manager's storage. There 
 | `aliexpress_coupons_show_all` | AliExpress | Whether the coupon list shows all codes. |
 | `jumia_gh_smart_watch` | both sites | Whether the opt-in smart watch is enabled (`true`/`false`). |
 | `jumia_gh_smart_watch_state` | both sites | Scheduler state: per-product due dates, validators, canary signals, budget, host backoff (JSON). |
+| `jumia_gh_dash_window` | both sites | Dashboard window position, size, maximized state, and snap preference (JSON). |
 
 ### History schema
 
@@ -439,7 +450,7 @@ npm install jsdom
 node tests/smartwatch.test.cjs
 ```
 
-Smart-watch tests should cover: `304` handling, the daily budget cap, canary campaign detection, target prioritisation, AliExpress skipping, visit-side metadata updates, target merging, and open-dashboard refresh with change badges. A headless Chromium screenshot is useful for layout checks:
+Smart-watch tests should cover: `304` handling, the daily budget cap, canary campaign detection, target prioritisation, AliExpress skipping, visit-side metadata updates, target merging, open-dashboard refresh with change badges, and window geometry (drag, snap, maximize, minimize, persistence). A headless Chromium screenshot is useful for layout checks:
 
 ```bash
 msedge --headless=new --disable-gpu --hide-scrollbars \
@@ -472,7 +483,7 @@ The project follows a pragmatic `MAJOR.MINOR.PATCH` scheme:
 - **MINOR** — new sites, major features, new dashboard capabilities.
 - **PATCH** — bug fixes, selector updates, styling and documentation fixes.
 
-Current release: **3.6.0** — changed products surface automatically in an open dashboard, with change badges and a **Recent changes** sort. See [`CHANGELOG.md`](CHANGELOG.md).
+Current release: **3.7.0** — a movable, resizable dashboard window with smart edge snapping, minimize/maximize, and remembered geometry. See [`CHANGELOG.md`](CHANGELOG.md).
 
 ---
 
