@@ -133,6 +133,9 @@ These are the assertions worth keeping when changing extraction, storage, or UI.
 - Maximize fills the viewport, restore returns to the previous rectangle, minimize collapses to the title bar, and closing removes the modal.
 - Dragging/resizing persists `{ x, y, w, h, max, snap }` to `jumia_gh_dash_window`; reopening restores it.
 - The floating panel exposes `.jpt-header`; a pointer drag sets inline `left/top`, clears `right/bottom`, and stores `{ x, y }` in `jumia_gh_panel_pos`. Dragging past an edge clamps the panel inside the viewport, a fresh load restores the saved spot, and a header double-click clears both the style and the key.
+- A redirecting background fetch with a renamed, much cheaper page appends a sample carrying `lc`, sets `listingChangedAt`, updates `url` to the redirect target, renders `.jtm-row.listing` with a `⚠ listing` badge (no `↓` badge), resets the row change to `0.0%`, and sends no notification.
+- A visit whose extracted name differs sharply from the stored name adds `lc: 'name'` and shows the `.jpt-listing` warning in the panel without a drop line.
+- Opening `.jtm-hist` shows `.jtm-detail` with one chart circle per sample, one `.jtm-chg` per consecutive price move (newest first), listing markers, and a summary computed from the post-swap baseline. Back and Escape return to the list; Escape then closes the dashboard.
 
 ### Smart watch
 - **304:** a stored `ETag` is sent as `If-None-Match`; a `304` adds no sample, increments misses, and pushes `nextCheck` forward.
@@ -201,6 +204,8 @@ The UI must remain readable.
 - [ ] With the dashboard open and sorted by **Recent**, make a background check detect a lower price: the row moves to the top during the refresh, shows a `↓x.x%` badge, and keeps your search text, sort, and scroll position.
 - [ ] Select **Recent changes**: products with the newest real movements come first, even if a later unchanged check appended a baseline sample.
 - [ ] The change badge disappears after 7 days (temporarily lower `changeHighlightMs` to verify).
+- [ ] Simulate a seller edit (rename the product and drop the price by >98% in DevTools before **Refresh**): the row shows `⚠ listing`, `Change` restarts near 0%, and no drop notification fires. Export JSON shows `lc` on the sample and `listingChangedAt` on the product.
+- [ ] Click 📈 on a row: the chart plots every sample and the list shows each price change newest first. The listing step is marked; Back and Escape return to the list.
 - [ ] Set a target via 🎯: badge appears; a target already met renders green and the product stops being scheduled.
 - [ ] Reload after a background check: the new sample survives and shows `src: "watch"` in Export JSON.
 - [ ] Leave the tab hidden: no new requests. Return to the tab: checks resume.

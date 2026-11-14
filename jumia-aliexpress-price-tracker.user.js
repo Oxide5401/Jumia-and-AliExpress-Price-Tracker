@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jumia Ghana – Price Tracker + Coupons + Dashboard
 // @namespace    https://github.com/yourname/jumia-price-tracker
-// @version      3.8.0
+// @version      3.9.0
 // @description  Robust price tracker with product images, persistent coupon finder, and tracking dashboard for jumia.com.gh and aliexpress.com (Ghana / GHS)
 // @author       Oxide5401
 // @homepageURL  https://github.com/Oxide5401/Jumia-and-AliExpress-Price-Tracker
@@ -238,10 +238,73 @@
                     from: from.p,
                     to: to.p,
                     pct: from.p ? ((to.p - from.p) / from.p) * 100 : 0,
+                    lc: to.lc || null,
                 };
             }
         }
         return null;
+    }
+    /** Words used to compare product names for listing-change detection. */
+    function nameTokens(name) {
+        return new Set(String(name || '')
+            .toLowerCase()
+            .replace(/[^a-z0-9]+/g, ' ')
+            .split(' ')
+            .filter(w => w.length > 2));
+    }
+    /** Jaccard similarity of two product names, or null when unavailable. */
+    function nameSimilarity(a, b) {
+        const A = nameTokens(a), B = nameTokens(b);
+        if (!A.size || !B.size) return null;
+        let shared = 0;
+        for (const t of A) if (B.has(t)) shared++;
+        return shared / (A.size + B.size - shared);
+    }
+    /** Stable identity of a product URL: AliExpress item id or Jumia slug. */
+    function urlIdentity(u) {
+        try {
+            const x = new URL(u, location.href);
+            if (/(^|\.)aliexpress\.com$/i.test(x.hostname)) {
+                const m = x.pathname.match(/\/(?:item|i)\/(\d+)/);
+                return m ? 'ali:' + m[1] : x.pathname.toLowerCase();
+            }
+            const m = x.pathname.match(/([a-zA-Z0-9\-]+)\.html$/);
+            return m ? m[1].toLowerCase() : x.pathname.toLowerCase();
+        } catch { return ''; }
+    }
+    /**
+     * Detects a seller-edited listing: an implausible price jump together with
+     * a changed product name or URL. Returns `{ reason }` or null.
+     */
+    function detectListingChange(prev, price, { oldName, newName, oldUrl, newUrl } = {}) {
+        if (!prev || typeof prev.p !== 'number' || !(prev.p > 0) || typeof price !== 'number') return null;
+        const ratio = price / prev.p;
+        const extreme = ratio <= 0.1 || ratio >= 10;
+        if (!extreme) return null;
+        const urlChanged = !!(oldUrl && newUrl && urlIdentity(oldUrl) !== urlIdentity(newUrl));
+        const sim = nameSimilarity(oldName, newName);
+        const nameChanged = sim != null && sim < 0.34;
+        // A ≥98% drop or 50× rise is not a plausible price move on its own.
+        if (ratio <= 0.02 || ratio >= 50) return { reason: urlChanged ? 'url' : nameChanged ? 'name' : 'price' };
+        if (urlChanged) return { reason: 'url' };
+        if (nameChanged) return { reason: 'name' };
+        return null;
+    }
+    /** Suspicious samples are marked with `lc`; stats restart from the newest. */
+    function priceBaseline(p) {
+        const s = (p && p.samples) || [];
+        for (let i = s.length - 1; i >= 0; i--)
+            if (s[i] && s[i].lc) return s[i];
+        return s[0] || null;
+    }
+    function formatDateTime(ms) {
+        if (!ms) return '—';
+        try {
+            return new Date(ms).toLocaleString(undefined, {
+                year: 'numeric', month: 'short', day: '2-digit',
+                hour: '2-digit', minute: '2-digit',
+            });
+        } catch { return new Date(ms).toISOString(); }
     }
     /** Fallback for products whose stored name is missing/blank/invisible. */
     function displayName(key, p) {
@@ -644,6 +707,8 @@
             ex.currency = ex.currency || p.currency || SITE.currency;
             ex.site = ex.site || p.site;
             ex.image = ex.image || p.image;
+            if (p.listingChangedAt && (!ex.listingChangedAt || p.listingChangedAt > ex.listingChangedAt))
+                ex.listingChangedAt = p.listingChangedAt;
             if (ex.target == null && typeof p.target === 'number') ex.target = p.target;
             ex.created = Math.min(ex.created || Date.now(), p.created || Date.now());
         }
@@ -672,10 +737,20 @@
         }
         const product = history[key];
         const last = product.samples.at(-1);
+        const listing = detectListingChange(last, info.price, {
+            oldName: product.name,
+            newName: cleanName || product.name,
+            oldUrl: product.url,
+            newUrl: location.href,
+        });
 
-        product.samples.push({ p: info.price, op: info.oldPrice || null, t: now, src: info.source });
+        product.samples.push({
+            p: info.price, op: info.oldPrice || null, t: now, src: info.source,
+            ...(listing ? { lc: listing.reason } : {}),
+        });
         if (product.samples.length > CONFIG.maxSamplesPerProduct)
             product.samples = product.samples.slice(-CONFIG.maxSamplesPerProduct);
+        if (listing) product.listingChangedAt = now;
 
         if (cleanName) product.name = cleanName;
         if (image) product.image = image;
@@ -690,7 +765,7 @@
 
         let dropPercent = null;
         if (last && info.price < last.p) dropPercent = ((last.p - info.price) / last.p) * 100;
-        return { product, isNew: !last, dropPercent, info };
+        return { product, isNew: !last, dropPercent, info, listing };
     }
 
     // ──────────────────────────────────────────────────────────────
@@ -927,6 +1002,7 @@
                 onload: r => resolve({
                     status: r.status,
                     text: r.responseText || '',
+                    finalUrl: r.finalUrl || '',
                     headers: parseHeaderMap(r.responseHeaders || ''),
                 }),
                 onerror: () => reject(new Error('network error')),
@@ -967,7 +1043,7 @@
     }
 
     // ── Applying a background result ─────────────────────────────
-    function applyWatchedPrice(key, info, doc, url) {
+    function applyWatchedPrice(key, info, doc, url, finalUrl) {
         const history = loadHistory();
         const product = history[key];
         if (!product) return null;
@@ -975,26 +1051,39 @@
         const last = product.samples.at(-1) || null;
         const changed = !last || last.p !== info.price;
         const stale = !last || now - (last.t || 0) >= DAY_MS;
+        const name = cleanProductName(info.name);
+        const nextUrl = finalUrl || url;
+        const listing = changed
+            ? detectListingChange(last, info.price, {
+                oldName: product.name,
+                newName: name || product.name,
+                oldUrl: product.url,
+                newUrl: nextUrl,
+            })
+            : null;
 
         // Record a sample on changes, plus one baseline sample per day so a
         // quiet product doesn't bloat storage with identical points.
         if (changed || stale) {
-            product.samples.push({ p: info.price, op: info.oldPrice || null, t: now, src: 'watch' });
+            product.samples.push({
+                p: info.price, op: info.oldPrice || null, t: now, src: 'watch',
+                ...(listing ? { lc: listing.reason } : {}),
+            });
             if (product.samples.length > CONFIG.maxSamplesPerProduct)
                 product.samples = product.samples.slice(-CONFIG.maxSamplesPerProduct);
         }
+        if (listing) product.listingChangedAt = now;
 
         const image = imageFromDoc(doc, url, isAliProduct(key, product));
         if (image) product.image = image;
-        const name = cleanProductName(info.name);
         if (name) product.name = name;
-        product.url = url;
+        product.url = nextUrl;
         product.currency = info.currency || product.currency || SITE.currency;
         product.site = product.site || (isAliProduct(key, product) ? 'aliexpress' : 'jumia');
         saveHistory(history);
 
         return {
-            changed, stale, product,
+            changed, stale, product, listing,
             dropPercent: changed && last && info.price < last.p
                 ? ((last.p - info.price) / last.p) * 100
                 : null,
@@ -1062,7 +1151,7 @@
             return { ok: false, changed: false };
         }
 
-        const applied = applyWatchedPrice(key, info, doc, url);
+        const applied = applyWatchedPrice(key, info, doc, url, res.finalUrl);
         if (!applied) return { ok: false, changed: false };
 
         noteHostSuccess(state, host);
@@ -1074,19 +1163,23 @@
         meta.misses = applied.changed ? 0 : (meta.misses || 0) + 1;
         meta.nextCheck = now + watchNextDelay(key, applied.product, meta, applied.changed, canaries);
 
-        if (applied.changed && canaries.has(key)) noteCanaryChange(state, key);
+        if (applied.changed && !applied.listing && canaries.has(key)) noteCanaryChange(state, key);
 
         if (applied.changed) {
-            log('Smart watch:', key, info.price,
-                applied.dropPercent != null ? `(-${applied.dropPercent.toFixed(1)}%)` : '');
-            notifyDrop({
-                product: applied.product, info,
-                dropPercent: applied.dropPercent,
-                siteLabel: siteLabelOf(key, applied.product),
-            });
+            if (applied.listing) {
+                log('Smart watch: listing changed for', key, '→', info.price);
+            } else {
+                log('Smart watch:', key, info.price,
+                    applied.dropPercent != null ? `(-${applied.dropPercent.toFixed(1)}%)` : '');
+                notifyDrop({
+                    product: applied.product, info,
+                    dropPercent: applied.dropPercent,
+                    siteLabel: siteLabelOf(key, applied.product),
+                });
+            }
             const target = targetOf(applied.product);
             const prev = applied.product.samples.at(-2)?.p;
-            if (target != null && info.price <= target && (prev == null || prev > target)) {
+            if (!applied.listing && target != null && info.price <= target && (prev == null || prev > target)) {
                 notify(
                     `${siteLabelOf(key, applied.product)}: target reached`,
                     `${displayName(key, applied.product)}\n` +
@@ -1632,6 +1725,7 @@
                 </div>
                 <div class="jpt-current">Detecting…</div>
                 <div class="jpt-stats"></div>
+                <div class="jpt-listing" hidden></div>
                 <div class="jpt-actions">
                     <button class="jpt-btn jpt-refresh">Refresh</button>
                     <button class="jpt-btn jpt-find-coupons">Find Coupons</button>
@@ -1708,6 +1802,11 @@
             }
             #${CONFIG.uiPanelId} .jpt-current { margin-bottom: 6px; font-weight: 600; }
             #${CONFIG.uiPanelId} .jpt-stats { margin-bottom: 10px; color: #666; font-size: 12px; }
+            #${CONFIG.uiPanelId} .jpt-listing {
+                margin: -4px 0 8px; padding: 5px 8px;
+                background: #fff7e6; border: 1px solid #f0c987; border-radius: 4px;
+                color: #8a5a00; font-size: 11px; line-height: 1.35;
+            }
             #${CONFIG.uiPanelId} .jpt-actions { display: flex; gap: 6px; margin-bottom: 10px; }
             #${CONFIG.uiPanelId} .jpt-btn {
                 flex: 1; padding: 6px 4px; border: 1px solid #ccc;
@@ -1907,13 +2006,21 @@
         if (!panel) return;
         const cur = panel.querySelector('.jpt-current');
         const st = panel.querySelector('.jpt-stats');
+        const listingEl = panel.querySelector('.jpt-listing');
         const nameEl = panel.querySelector('.jpt-product-name');
         const thumbEl = panel.querySelector('.jpt-thumb');
+        const hideListing = () => {
+            if (!listingEl) return;
+            listingEl.hidden = true;
+            listingEl.textContent = '';
+            listingEl.removeAttribute('title');
+        };
         if (!result) {
             cur.textContent = 'No price data on this page.';
             st.textContent = '';
             if (nameEl) nameEl.textContent = '';
             setThumb(thumbEl, '');
+            hideListing();
             return;
         }
         const { product, dropPercent, info } = result;
@@ -1922,15 +2029,26 @@
         setThumb(thumbEl, product.image, product.name);
         cur.textContent = `Current: ${formatMoney(info.price, curCode)}`;
         if (info.oldPrice) cur.textContent += `  (was ${formatMoney(info.oldPrice, curCode)})`;
+        const base = priceBaseline(product);
         let s = `Samples: ${product.samples.length}`;
-        if (product.samples.length > 1) {
-            const first = product.samples[0].p, last = product.samples.at(-1).p;
-            const ch = ((last - first) / first) * 100;
+        if (product.samples.length > 1 && base && base.p > 0) {
+            const last = product.samples.at(-1).p;
+            const ch = ((last - base.p) / base.p) * 100;
             s += `  |  Change: ${ch >= 0 ? '+' : ''}${ch.toFixed(1)}%`;
         }
-        if (dropPercent != null && dropPercent >= CONFIG.dropThresholdPercent)
+        if (!result.listing && dropPercent != null && dropPercent >= CONFIG.dropThresholdPercent)
             s += `  |  🎉 Drop: -${dropPercent.toFixed(1)}%`;
         st.textContent = s;
+
+        // A seller-edited listing is flagged for 30 days so a fake collapse
+        // is never presented as a real price move.
+        const changedAt = product.listingChangedAt || 0;
+        if (listingEl && changedAt && Date.now() - changedAt < 30 * DAY_MS) {
+            listingEl.hidden = false;
+            listingEl.textContent = `⚠ Listing changed ${timeAgo(changedAt)} — seller likely replaced this product.`;
+            listingEl.title = 'The product name or URL changed at the same time as an implausible price jump, ' +
+                'so earlier samples belong to a different listing. They are kept in the dashboard history.';
+        } else hideListing();
     }
 
     function renderCoupons() {
@@ -2203,7 +2321,7 @@
             #${CONFIG.trackedModalId} .jtm-footer .jtm-clear-all { margin-left: auto; color: #b00; border-color: #e2b3b3; }
             #${CONFIG.trackedModalId} .jtm-footer .jtm-clear-all:hover { background: #fdecec; }
             #${CONFIG.trackedModalId} .jtm-row {
-                display: grid; grid-template-columns: 1fr auto auto auto auto auto auto;
+                display: grid; grid-template-columns: 1fr auto auto auto auto auto auto auto;
                 gap: 10px; align-items: center;
                 padding: 8px 6px; border-bottom: 1px solid #f0f0f0;
             }
@@ -2261,9 +2379,15 @@
             #${CONFIG.trackedModalId} .jtm-flag.up {
                 color: #b00; background: #fdecec; border: 1px solid #efc4c4;
             }
+            #${CONFIG.trackedModalId} .jtm-flag.listing {
+                color: #8a5a00; background: #fff4dd; border: 1px solid #f0c987;
+                font-family: system-ui, sans-serif; font-weight: 600;
+            }
             #${CONFIG.trackedModalId} .jtm-row.changed { background: #fffdf8; }
             #${CONFIG.trackedModalId} .jtm-row.changed.down { background: #f7fcf8; }
             #${CONFIG.trackedModalId} .jtm-row.changed:hover { background: #fff7ec; }
+            #${CONFIG.trackedModalId} .jtm-row.listing { background: #fffaf0; }
+            #${CONFIG.trackedModalId} .jtm-row.listing:hover { background: #fff4dd; }
             #${CONFIG.trackedModalId} .jtm-cell {
                 font-family: ui-monospace, Menlo, monospace; font-size: 12px; color: #444;
                 min-width: 66px; text-align: right;
@@ -2283,6 +2407,11 @@
                 font-size: 16px; line-height: 1; padding: 2px 6px; border-radius: 4px;
             }
             #${CONFIG.trackedModalId} .jtm-del:hover { background: #fdecec; }
+            #${CONFIG.trackedModalId} .jtm-hist {
+                background: none; border: none; cursor: pointer; color: #777;
+                font-size: 14px; line-height: 1; padding: 2px 5px; border-radius: 4px;
+            }
+            #${CONFIG.trackedModalId} .jtm-hist:hover { background: #f0f0f0; color: #d35400; }
             #${CONFIG.trackedModalId} .jtm-target {
                 background: none; border: 1px dashed #ccc; border-radius: 4px;
                 cursor: pointer; font-size: 11px; color: #999;
@@ -2307,6 +2436,67 @@
                 padding: 5px 8px; border: 1px solid #ccc;
                 border-radius: 4px; font-size: 12px; background: #fff; color: #333;
             }
+            #${CONFIG.trackedModalId} .jtm-detail { padding: 2px 0 10px; }
+            #${CONFIG.trackedModalId} .jtm-detail-head {
+                display: flex; align-items: center; gap: 10px; margin-bottom: 8px;
+            }
+            #${CONFIG.trackedModalId} .jtm-back {
+                flex: 0 0 auto; padding: 4px 9px; border: 1px solid #ccc; background: #fff;
+                border-radius: 4px; cursor: pointer; font-size: 12px; color: #333;
+            }
+            #${CONFIG.trackedModalId} .jtm-back:hover { background: #f0f0f0; }
+            #${CONFIG.trackedModalId} .jtm-detail-title {
+                font-weight: 700; font-size: 14px; color: #222;
+                overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+            }
+            #${CONFIG.trackedModalId} .jtm-detail-sub {
+                display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+                font-size: 11px; color: #777; margin-bottom: 10px;
+            }
+            #${CONFIG.trackedModalId} .jtm-detail-sub a { color: #2456a6; text-decoration: none; }
+            #${CONFIG.trackedModalId} .jtm-detail-sub a:hover { text-decoration: underline; }
+            #${CONFIG.trackedModalId} .jtm-detail-note {
+                background: #fff7e6; border: 1px solid #f0c987; color: #8a5a00;
+                border-radius: 4px; padding: 6px 9px; font-size: 11px; line-height: 1.4;
+                margin-bottom: 10px;
+            }
+            #${CONFIG.trackedModalId} .jtm-detail-stats {
+                display: flex; flex-wrap: wrap; gap: 6px 18px;
+                font-family: ui-monospace, Menlo, monospace; font-size: 12px; color: #444;
+                margin-bottom: 10px;
+            }
+            #${CONFIG.trackedModalId} .jtm-detail-stats b {
+                display: block; font-family: system-ui, sans-serif; font-size: 9px;
+                text-transform: uppercase; letter-spacing: .5px; color: #999; font-weight: 600;
+            }
+            #${CONFIG.trackedModalId} .jtm-chart {
+                background: #fffdf9; border: 1px solid #f0e3d3; border-radius: 6px;
+                padding: 4px; margin-bottom: 12px;
+            }
+            #${CONFIG.trackedModalId} .jtm-chart svg { display: block; width: 100%; height: auto; }
+            #${CONFIG.trackedModalId} .jtm-chart-empty {
+                padding: 24px 10px; text-align: center; color: #999; font-size: 12px;
+            }
+            #${CONFIG.trackedModalId} .jtm-changes-title { font-weight: 600; font-size: 12px; color: #555; margin-bottom: 4px; }
+            #${CONFIG.trackedModalId} .jtm-changes-title span { color: #999; font-weight: 500; }
+            #${CONFIG.trackedModalId} .jtm-chg {
+                display: flex; align-items: center; flex-wrap: wrap; gap: 8px;
+                padding: 5px 4px; border-bottom: 1px solid #f4f4f4; font-size: 11px;
+            }
+            #${CONFIG.trackedModalId} .jtm-chg:last-child { border-bottom: none; }
+            #${CONFIG.trackedModalId} .jtm-chg.listing { background: #fffaf0; }
+            #${CONFIG.trackedModalId} .jtm-chg-time { flex: 0 0 62px; color: #999; }
+            #${CONFIG.trackedModalId} .jtm-chg-prices {
+                flex: 1; min-width: 170px;
+                font-family: ui-monospace, Menlo, monospace; color: #444;
+            }
+            #${CONFIG.trackedModalId} .jtm-chg-pct {
+                min-width: 58px; text-align: right; font-weight: 700;
+                font-family: ui-monospace, Menlo, monospace;
+            }
+            #${CONFIG.trackedModalId} .jtm-chg-pct.down { color: #128a3e; }
+            #${CONFIG.trackedModalId} .jtm-chg-pct.up { color: #b00; }
+            #${CONFIG.trackedModalId} .jtm-chg-src { flex: 0 0 42px; text-align: right; color: #aaa; }
             #${CONFIG.trackedModalId} .jtm-import-wrap {
                 position: absolute; inset: 0; z-index: 5;
                 background: rgba(255,255,255,.98);
@@ -2438,6 +2628,7 @@
                 try { cleanups.pop()(); } catch { /* ignore */ }
             }
             persist();
+            detailKey = null;
             modal.remove();
         };
         const listen = (target, type, fn, opts) => {
@@ -2556,7 +2747,9 @@
             paint();
         });
         listen(document, 'keydown', e => {
-            if (e.key === 'Escape') closeModal();
+            if (e.key !== 'Escape') return;
+            if (detailKey) { detailKey = null; renderTrackedModal(true); return; }
+            closeModal();
         });
 
         modal.querySelector('.jtm-backdrop').addEventListener('click', closeModal);
@@ -2623,6 +2816,10 @@
             }
         });
         modal.querySelector('.jtm-body').addEventListener('click', e => {
+            const back = e.target.closest('.jtm-back');
+            if (back) { detailKey = null; renderTrackedModal(true); return; }
+            const hist = e.target.closest('.jtm-hist');
+            if (hist) { detailKey = hist.dataset.key; renderTrackedModal(true); return; }
             const target = e.target.closest('.jtm-target');
             if (target) { editTarget(target.dataset.key); return; }
             const del = e.target.closest('.jtm-del');
@@ -2658,6 +2855,107 @@
         return true;
     }
 
+    let detailKey = null;
+
+    function priceChartSvg(samples, code) {
+        const pts = (samples || []).filter(s => s && typeof s.p === 'number');
+        if (pts.length < 2) return '<div class="jtm-chart-empty">Not enough samples to chart yet.</div>';
+        const W = 640, H = 170, PAD = 16;
+        const times = pts.map(s => s.t || 0);
+        let t0 = Math.min(...times), t1 = Math.max(...times);
+        if (t1 === t0) t1 = t0 + 1;
+        const prices = pts.map(s => s.p);
+        const rawLo = Math.min(...prices), rawHi = Math.max(...prices);
+        const padY = Math.max(0.5, (rawHi - rawLo) * 0.12);
+        const lo = rawLo - padY, hi = rawHi + padY;
+        const x = t => PAD + ((t - t0) / (t1 - t0)) * (W - PAD * 2);
+        const y = p => H - PAD - ((p - lo) / (hi - lo)) * (H - PAD * 2);
+        const points = pts.map(s => `${x(s.t || 0).toFixed(1)},${y(s.p).toFixed(1)}`).join(' ');
+        const dots = pts.map(s => {
+            const lc = !!s.lc;
+            return `<circle cx="${x(s.t || 0).toFixed(1)}" cy="${y(s.p).toFixed(1)}" ` +
+                `r="${lc ? 4 : 2.4}" fill="${lc ? '#c47b00' : '#ff6a00'}"` +
+                `${lc ? ' stroke="#fff" stroke-width="1.5"' : ''}>` +
+                `<title>${escapeHtml(formatMoney(s.p, code))} · ${escapeHtml(formatDateTime(s.t))}` +
+                `${lc ? ' · listing changed' : ''}</title></circle>`;
+        }).join('');
+        return `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Price history chart">
+            <line x1="${PAD}" y1="${H - PAD}" x2="${W - PAD}" y2="${H - PAD}" stroke="#e8ded2" />
+            <polyline points="${points}" fill="none" stroke="#ff6a00" stroke-width="1.8"
+                stroke-linejoin="round" stroke-linecap="round" />
+            ${dots}
+            <text x="${PAD}" y="12" font-size="10" fill="#999">${escapeHtml(formatMoney(rawHi, code))}</text>
+            <text x="${PAD}" y="${H - PAD - 4}" font-size="10" fill="#999">${escapeHtml(formatMoney(rawLo, code))}</text>
+        </svg>`;
+    }
+
+    function renderHistoryDetail(body, key, p, now) {
+        const code = p.currency || 'GHS';
+        const label = displayName(key, p);
+        const isAli = (p.site || (key.startsWith('ali:') ? 'aliexpress' : 'jumia')) === 'aliexpress';
+        const samples = (Array.isArray(p.samples) ? p.samples : [])
+            .filter(s => s && typeof s.p === 'number');
+        const base = priceBaseline(p) || samples[0] || null;
+        const baseIdx = base ? Math.max(0, samples.indexOf(base)) : 0;
+        const view = samples.slice(baseIdx);
+        const cur = view.length ? view.at(-1).p : null;
+        const low = view.length ? Math.min(...view.map(s => s.p)) : null;
+        const high = view.length ? Math.max(...view.map(s => s.p)) : null;
+        const change = base && base.p ? ((cur - base.p) / base.p) * 100 : 0;
+
+        const changes = [];
+        for (let i = 1; i < samples.length; i++) {
+            const a = samples[i - 1], b = samples[i];
+            if (!a || !b || a.p === b.p) continue;
+            changes.push({
+                t: b.t || 0, from: a.p, to: b.p,
+                pct: a.p ? ((b.p - a.p) / a.p) * 100 : 0,
+                lc: b.lc || null, src: b.src || '',
+            });
+        }
+        changes.reverse();
+
+        const chRows = changes.length ? changes.map(c => `
+            <div class="jtm-chg${c.lc ? ' listing' : ''}">
+                <span class="jtm-chg-time" title="${escapeHtml(formatDateTime(c.t))}">${timeAgo(c.t)}</span>
+                <span class="jtm-chg-prices">${formatMoney(c.from, code)} → ${formatMoney(c.to, code)}</span>
+                <span class="jtm-chg-pct ${c.pct < 0 ? 'down' : 'up'}">${c.pct >= 0 ? '+' : ''}${c.pct.toFixed(1)}%</span>
+                ${c.lc ? '<span class="jtm-flag listing" title="Seller edit: the name or URL changed at the same time as this jump">⚠ listing</span>' : ''}
+                <span class="jtm-chg-src" title="Recorded by">${c.src === 'watch' ? 'watch' : 'page'}</span>
+            </div>`).join('') : '<div class="jtm-empty">No price changes recorded yet.</div>';
+
+        const note = p.listingChangedAt
+            ? `<div class="jtm-detail-note">⚠ Listing changed ${timeAgo(p.listingChangedAt)} — the seller likely
+                replaced this product (or the price data is implausible). The chart keeps every sample, but the
+                summary and change list restart from the first sample after the change.</div>`
+            : '';
+
+        body.innerHTML = `
+            <div class="jtm-detail">
+                <div class="jtm-detail-head">
+                    <button class="jtm-back" type="button">← Back</button>
+                    <span class="jtm-detail-title" title="${escapeHtml(label)}">${escapeHtml(truncate(label, 90))}</span>
+                </div>
+                <div class="jtm-detail-sub">
+                    <span class="jtm-tag ${isAli ? 'ali' : ''}">${isAli ? 'AliExpress' : 'Jumia'}</span>
+                    ${p.url ? `<a href="${escapeHtml(p.url)}" target="_blank" rel="noopener">Open product ↗</a>` : ''}
+                    <span>Tracked ${timeAgo(p.created)}</span>
+                    <span>· ${samples.length} sample${samples.length === 1 ? '' : 's'}</span>
+                    <span>· ${changes.length} change${changes.length === 1 ? '' : 's'}</span>
+                </div>
+                ${note}
+                <div class="jtm-detail-stats">
+                    <span><b>Current</b>${formatMoney(cur, code)}</span>
+                    <span><b>Low</b>${formatMoney(low, code)}</span>
+                    <span><b>High</b>${formatMoney(high, code)}</span>
+                    <span><b>Change</b>${change >= 0 ? '+' : ''}${change.toFixed(1)}%</span>
+                </div>
+                <div class="jtm-chart">${priceChartSvg(samples, code)}</div>
+                <div class="jtm-changes-title">Price changes <span>(newest first)</span></div>
+                <div class="jtm-changes">${chRows}</div>
+            </div>`;
+    }
+
     function renderTrackedModal(preserve = false) {
         const modal = document.getElementById(CONFIG.trackedModalId);
         if (!modal) return;
@@ -2669,22 +2967,35 @@
         const history = loadHistory();
         const now = Date.now();
 
+        countEl.textContent = `(${Object.keys(history).length})`;
+        if (detailKey && !history[detailKey]) detailKey = null;
+        if (detailKey) {
+            renderHistoryDetail(body, detailKey, history[detailKey], now);
+            body.scrollTop = prevScroll;
+            renderWatchStatus();
+            return;
+        }
+
         const rows = Object.entries(history).map(([key, p]) => {
-            const ps = p.samples.map(s => s.p);
-            const cur = ps.at(-1);
+            const samples = Array.isArray(p.samples) ? p.samples : [];
+            const base = priceBaseline(p) || samples[0] || null;
+            const baseIdx = base ? Math.max(0, samples.indexOf(base)) : 0;
+            const view = samples.slice(baseIdx).filter(s => s && typeof s.p === 'number');
+            const cur = view.length ? view.at(-1).p : null;
+            const ps = view.map(s => s.p);
             const first = ps[0];
-            const low = Math.min(...ps);
-            const high = Math.max(...ps);
+            const low = ps.length ? Math.min(...ps) : null;
+            const high = ps.length ? Math.max(...ps) : null;
             const change = first ? ((cur - first) / first) * 100 : 0;
-            const lastT = p.samples.at(-1)?.t || 0;
+            const lastT = samples.at(-1)?.t || 0;
             const moved = latestChange(p);
+            const listingRecent = !!(p.listingChangedAt &&
+                now - p.listingChangedAt <= CONFIG.watch.changeHighlightMs);
             return {
-                key, p, cur, low, high, change, lastT, moved,
+                key, p, cur, low, high, change, lastT, moved, listingRecent,
                 recentChange: !!moved && now - moved.t <= CONFIG.watch.changeHighlightMs,
             };
-        }).sort((a, b) => b.lastT - a.lastT);
-
-        countEl.textContent = `(${rows.length})`;
+        }).filter(r => r.cur != null).sort((a, b) => b.lastT - a.lastT);
 
         if (!rows.length) {
             body.innerHTML = '<div class="jtm-empty">No products tracked yet.<br>Visit a product page to start tracking.</div>';
@@ -2738,13 +3049,19 @@
                 const targetCls = target != null ? (atTarget ? ' set met' : ' set') : '';
                 const targetText = target != null ? formatMoney(target, code) : '🎯 set';
                 const moved = r.recentChange ? r.moved : null;
+                const listing = r.listingRecent;
                 const movedDir = moved && moved.pct < 0 ? 'down' : 'up';
-                const movedFlag = moved
-                    ? `<span class="jtm-flag ${movedDir}" title="Changed ${timeAgo(moved.t)}: ${
-                        formatMoney(moved.from, code)} → ${formatMoney(moved.to, code)}">${
-                        movedDir === 'down' ? '↓' : '↑'}${Math.abs(moved.pct).toFixed(1)}%</span>`
-                    : '';
-                const rowCls = moved ? ` changed ${movedDir}` : '';
+                const movedFlag = listing
+                    ? `<span class="jtm-flag listing" title="Likely seller edit detected ${timeAgo(r.p.listingChangedAt)}: an implausible price jump coincided with a changed name/URL. Open the price history for details.">⚠ listing</span>`
+                    : moved
+                        ? `<span class="jtm-flag ${movedDir}" title="Changed ${timeAgo(moved.t)}: ${
+                            formatMoney(moved.from, code)} → ${formatMoney(moved.to, code)}">${
+                            movedDir === 'down' ? '↓' : '↑'}${Math.abs(moved.pct).toFixed(1)}%</span>`
+                        : '';
+                const rowCls = listing ? ' listing' : moved ? ` changed ${movedDir}` : '';
+                const changeTitle = listing
+                    ? `Change measured from ${formatDateTime(r.p.listingChangedAt)}, after the listing changed`
+                    : 'Change since the first recorded sample';
                 return `
                     <div class="jtm-row${rowCls}">
                         <div class="jtm-name" title="${escapeHtml(label)}">
@@ -2764,7 +3081,8 @@
                         <div class="jtm-cell lbl jtm-cur" data-label="Current">${formatMoney(r.cur, code)}</div>
                         <div class="jtm-cell lbl jtm-low"  data-label="Low">${formatMoney(r.low, code)}</div>
                         <div class="jtm-cell lbl jtm-high" data-label="High">${formatMoney(r.high, code)}</div>
-                        <div class="jtm-cell lbl jtm-change ${cls}" data-label="Change">${sign}${r.change.toFixed(1)}%</div>
+                        <div class="jtm-cell lbl jtm-change ${cls}" data-label="Change" title="${escapeHtml(changeTitle)}">${sign}${r.change.toFixed(1)}%</div>
+                        <button class="jtm-hist" data-key="${escapeHtml(r.key)}" title="View all price changes">📈</button>
                         <button class="jtm-del" data-key="${escapeHtml(r.key)}" title="Delete">×</button>
                     </div>`;
             }).join('');
@@ -2831,8 +3149,9 @@
                 lastTrackedKey = key;
                 trackingKey = null;
                 log('Recorded:', r.info, '(source:', r.info.source + ')');
+                if (r.listing) log('Listing changed for', key, '(old prices kept in history).');
                 updatePanel(r); updateTrackedBadge();
-                notifyDrop(r);
+                if (!r.listing) notifyDrop(r);
             } else if (attempts < CONFIG.extractAttempts) {
                 setTimeout(tryExtract, CONFIG.extractDelayMs);
             } else {

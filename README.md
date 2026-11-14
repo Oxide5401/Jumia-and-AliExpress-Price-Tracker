@@ -2,7 +2,7 @@
 
 A single Tampermonkey/Violentmonkey userscript that tracks product prices on **Jumia Ghana** (`jumia.com.gh`) and **AliExpress** (Ghana shipping, GHS), finds and stores coupon codes, and shows everything in one dashboard — including **product thumbnails**.
 
-![Version](https://img.shields.io/badge/version-3.8.0-orange)
+![Version](https://img.shields.io/badge/version-3.9.0-orange)
 ![License](https://img.shields.io/badge/license-MIT-blue)
 ![Platform](https://img.shields.io/badge/platform-Tampermonkey%20%7C%20Violentmonkey-2ea44f)
 
@@ -62,6 +62,12 @@ A single Tampermonkey/Violentmonkey userscript that tracks product prices on **J
 - Recently changed rows get a subtle green (drop) or orange (rise) tint for **7 days**.
 - A **Recent changes** sort orders every product by the time of its last real movement, so changes stay findable even after later unchanged checks.
 
+### Listing changes and price history (new in 3.9.0)
+- **Seller edits are detected.** If a product's name or URL changes at the same time as an implausible price jump (a ≥98% collapse or 50× rise), the sample is marked as a listing change instead of being reported as a real drop.
+- The dashboard row and the floating panel show **⚠ listing** instead of a misleading `-99.9%`, and no false price-drop notification is sent.
+- Low/high/change stats restart from the first sample after the swap, while the old samples stay in the history.
+- **📈 Price history** on any dashboard row opens a per-product view with a chart of every sample and a newest-first list of every price change, including listing-change markers.
+
 ### Smart watch (new in 3.5.0, off by default)
 - Optional background price checks while a Jumia or AliExpress tab is open — no server, no always-on background page.
 - **Canary-gated:** a few volatile products act as signals; the rest are checked only when there is evidence a price may have moved.
@@ -82,8 +88,9 @@ A single Tampermonkey/Violentmonkey userscript that tracks product prices on **J
 ### Dashboard
 - One list for both sites, with a `Jumia` / `AliExpress` tag per row.
 - Search by name; sort by recent changes, recent, biggest drop/rise, lowest/highest price, or name.
-- Per-row current / low / high / change, plus a delete button.
-- `↓` / `↑` badges and a soft tint mark products that moved within the last 7 days.
+- Per-row current / low / high / change, a target button, a price-history button, and a delete button.
+- `↓` / `↑` badges and a soft tint mark products that moved within the last 7 days; a `⚠ listing` badge marks likely seller edits.
+- **📈 Price history** per row: a chart of every sample plus a newest-first list of all price changes.
 - **Export JSON**, merge-safe **Import JSON**, **Fetch images**, and **Clear All**.
 - Works on any page of either site — you do not need to be on a product page.
 
@@ -166,6 +173,7 @@ Your data is still attached to the original script. Rescue it like this:
 | Product block | Thumbnail plus the product name of the page you are on. |
 | Current | Current price and, when available, the pre-discount price. |
 | Stats | Sample count, change since the first sample, and drop alerts. |
+| Listing warning | `⚠ Listing changed` appears for 30 days after a seller edit is detected, replacing any fake drop alert. |
 | **Refresh** | Re-extracts the price now and records a sample. |
 | **Find Coupons** | Scans this page and the site's coupon pages immediately. |
 | **Clear** | Removes this product from history and clears the site's coupon cache. Treats the site's cache as disposable; your other tracked products are untouched. |
@@ -191,9 +199,11 @@ Open it with the 📊 button in the panel.
 
 - **Filter by name** — case-insensitive substring match; blank stored names still match their fallback label.
 - **Sort** — Recent changes (last real price movement), Recent (last sample), Biggest drop, Biggest rise, Lowest price, Highest price, Name.
-- **Rows** — site tag, thumbnail, change badge, name (tooltip shows the full stored name), target, current, low, high, change, delete.
+- **Rows** — site tag, thumbnail, change badge, name (tooltip shows the full stored name), target, current, low, high, change, price history, delete.
 - **Live updates** — if a background check or the page you are on records a new price, the open dashboard refreshes in place and keeps your filter, sort, and scroll position.
 - **Change highlight** — a `↓` / `↑` badge and soft row tint mark movement within the last 7 days. The badge tooltip shows the old and new price.
+- **Listing changes** — a `⚠ listing` badge and amber tint mean the product name or URL changed at the same time as an implausible jump. Stats restart after the swap, so a seller edit never looks like a 99% discount.
+- **Price history** — the 📈 button opens a chart of every sample plus all price changes, newest first, with listing-change steps marked. Use it to inspect a product's full timeline; Back or Escape returns to the list.
 - **Smart watch bar** — enable/disable background checks, see today's budget and next check, or run one check immediately.
 - **Export JSON** — copies the full history to the clipboard as pretty-printed JSON.
 - **Import JSON** — paste an export; **Merge** adds new products/samples and fills missing fields without deleting anything.
@@ -309,9 +319,11 @@ All data stays in your browser, inside your userscript manager's storage. There 
     "image": "https://gh.jumia.is/.../1.jpg",
     "target": 1299,
     "created": 1730000000000,
+    "listingChangedAt": 1730200000000,
     "samples": [
       { "p": 1499, "op": null, "t": 1730000000000, "src": "dom" },
-      { "p": 1299, "op": 1499, "t": 1730100000000, "src": "json-ld" }
+      { "p": 1299, "op": 1499, "t": 1730100000000, "src": "json-ld" },
+      { "p": 118.13, "op": null, "t": 1730200000000, "src": "watch", "lc": "url" }
     ]
   },
   "ali:1005006187992416": {
@@ -331,6 +343,8 @@ All data stays in your browser, inside your userscript manager's storage. There 
 - `op` — old/pre-discount price, when the page exposes one.
 - `t` — sample timestamp in milliseconds.
 - `src` — extraction strategy that produced the sample (`dom`, `json-ld`, `state`, `meta`, or `watch` for a background check).
+- `lc` — optional listing-change marker (`name`, `url`, or `price`) when a seller edit made the previous price incomparable.
+- `listingChangedAt` — optional timestamp of the most recent detected seller edit; stats and the panel warning use it.
 - `image` — optional absolute image URL.
 - `target` — optional target price in the product's currency.
 
@@ -452,7 +466,7 @@ npm install jsdom
 node tests/smartwatch.test.cjs
 ```
 
-Smart-watch tests should cover: `304` handling, the daily budget cap, canary campaign detection, target prioritisation, AliExpress skipping, visit-side metadata updates, target merging, open-dashboard refresh with change badges, dashboard window geometry (drag, snap, maximize, minimize, persistence), and panel dragging/persistence. A headless Chromium screenshot is useful for layout checks:
+Smart-watch tests should cover: `304` handling, the daily budget cap, canary campaign detection, target prioritisation, AliExpress skipping, visit-side metadata updates, target merging, open-dashboard refresh with change badges, dashboard window geometry (drag, snap, maximize, minimize, persistence), panel dragging/persistence, listing-change detection (visit + redirected background fetch), and the per-product history view. A headless Chromium screenshot is useful for layout checks:
 
 ```bash
 msedge --headless=new --disable-gpu --hide-scrollbars \
@@ -485,7 +499,7 @@ The project follows a pragmatic `MAJOR.MINOR.PATCH` scheme:
 - **MINOR** — new sites, major features, new dashboard capabilities.
 - **PATCH** — bug fixes, selector updates, styling and documentation fixes.
 
-Current release: **3.8.0** — the floating panel can be dragged anywhere and reopens where you left it. See [`CHANGELOG.md`](CHANGELOG.md).
+Current release: **3.9.0** — seller-edited listings are flagged instead of showing a fake 99% drop, and every product has a chart plus full price-change history. See [`CHANGELOG.md`](CHANGELOG.md).
 
 ---
 

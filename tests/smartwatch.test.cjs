@@ -36,7 +36,8 @@ async function makeEnv({ url = 'https://www.jumia.com.gh/', storage = {}, respon
     win.GM_getValue = (k, d) => store.has(k) ? store.get(k) : d;
     win.GM_setValue = (k, v) => { store.set(k, v); };
     win.GM_addStyle = () => {};
-    win.GM_notification = () => {};
+    win.__notifications = [];
+    win.GM_notification = o => { win.__notifications.push(o); };
     win.__alerts = [];
     win.alert = m => { win.__alerts.push(String(m)); };
     win.confirm = () => true;
@@ -70,6 +71,7 @@ async function makeEnv({ url = 'https://www.jumia.com.gh/', storage = {}, respon
                 status: resp.status == null ? 200 : resp.status,
                 responseText: resp.text || '',
                 responseHeaders: resp.headers || '',
+                finalUrl: resp.finalUrl || '',
             });
         });
     };
@@ -588,6 +590,132 @@ test('mini panel can be dragged and remembers its position', async () => {
     assert.strictEqual(panel2.style.left, '', 'reset clears left');
     assert.strictEqual(panel2.style.top, '', 'reset clears top');
     assert.strictEqual(env2.store.get('jumia_gh_panel_pos'), '', 'reset clears storage');
+});
+
+// ── 12. Seller-edited listings are flagged instead of a fake price crash ─
+test('a redirected, renamed listing is flagged and does not notify a drop', async () => {
+    const key = 'old-phone';
+    const oldUrl = 'https://www.jumia.com.gh/old-phone.html';
+    const newUrl = 'https://www.jumia.com.gh/replacement-case.html';
+    const history = {
+        [key]: {
+            name: 'Original Smartphone 128GB', url: oldUrl, site: 'jumia', currency: 'GHS',
+            samples: [{ p: 1200, t: realNow - 30 * HOUR }], created: realNow - 15 * DAY,
+        },
+    };
+    const metas = {
+        [key]: { lastCheck: realNow - 9 * HOUR, nextCheck: 0, misses: 0, failures: 0, etag: null, lastModified: null, lastPrice: 1200, rechecksLeft: 0 },
+    };
+    const storage = {
+        ...seedHistory(history),
+        [WATCH_KEY]: true,
+        [STATE_KEY]: JSON.stringify(stateWith(metas)),
+        jumia_gh_coupons_last_fetch: realNow,
+    };
+    const env = await makeEnv({
+        storage,
+        responses: {
+            [oldUrl]: { status: 200, finalUrl: newUrl, text: page(99, 'Phone Case Cover', newUrl) },
+        },
+    });
+    await openDashboard(env);
+    await runDue(env, 20000);
+
+    const h = loadJSON(env, HISTORY_KEY)[key];
+    const last = h.samples.at(-1);
+    assert.strictEqual(last.p, 99, 'new price recorded');
+    assert.strictEqual(last.lc, 'url', 'sample marked as a URL-driven listing change');
+    assert(h.listingChangedAt, 'listing change timestamp stored');
+    assert.strictEqual(h.url, newUrl, 'redirect target saved');
+    assert.strictEqual(env.win.__notifications.length, 0, 'no misleading drop notification');
+
+    const doc = env.win.document;
+    const row = doc.querySelector('.jtm-row.listing');
+    assert(row, 'row tinted as a listing change');
+    assert(row.querySelector('.jtm-flag.listing'), 'listing badge rendered');
+    assert(!row.querySelector('.jtm-flag.down'), 'no fake drop badge');
+    assert(/0\.0%/.test(row.querySelector('.jtm-change').textContent), 'change restarts after the swap');
+});
+
+// ── 13. Per-product price history view ────────────────────────────────
+test('dashboard history view charts samples and lists every change', async () => {
+    const key = 'p1';
+    const url = 'https://www.jumia.com.gh/p1.html';
+    const history = {
+        [key]: {
+            name: 'Phone', url, site: 'jumia', currency: 'GHS', created: realNow - 20 * DAY,
+            listingChangedAt: realNow - HOUR,
+            samples: [
+                { p: 100, t: realNow - 10 * DAY },
+                { p: 90, t: realNow - 8 * DAY },
+                { p: 80, t: realNow - 6 * DAY },
+                { p: 20, t: realNow - HOUR, lc: 'name' },
+                { p: 18, t: realNow - 30 * 60 * 1000 },
+            ],
+        },
+    };
+    const storage = { ...seedHistory(history), jumia_gh_coupons_last_fetch: realNow };
+    const env = await makeEnv({ storage });
+    await openDashboard(env);
+
+    const doc = env.win.document;
+    const row = doc.querySelector('.jtm-row');
+    assert(row.classList.contains('listing'), 'row explains the listing change');
+    assert(/−|-\s?10\.0%/.test(row.querySelector('.jtm-change').textContent), 'change ignores pre-swap prices');
+
+    row.querySelector('.jtm-hist').click();
+    assert(doc.querySelector('.jtm-detail'), 'history view opened');
+    assert(doc.querySelector('.jtm-chart svg'), 'chart rendered');
+    assert.strictEqual(doc.querySelectorAll('.jtm-chart circle').length, 5, 'one dot per sample');
+    const chgs = [...doc.querySelectorAll('.jtm-chg')];
+    assert.strictEqual(chgs.length, 4, 'four price changes listed');
+    assert(!chgs[0].classList.contains('listing'), 'ordinary newest change not marked');
+    assert(/18\.00/.test(chgs[0].textContent), 'newest change shows the new price');
+    assert(chgs[1].classList.contains('listing'), 'listing-change step is marked');
+    assert(/listing/i.test(doc.querySelector('.jtm-detail-note').textContent), 'note explains the swap');
+    const stats = doc.querySelector('.jtm-detail-stats').textContent;
+    assert(/18\.00/.test(stats), 'current price shown');
+    assert(/20\.00/.test(stats), 'high restarts after the listing change');
+
+    doc.querySelector('.jtm-back').click();
+    assert(!doc.querySelector('.jtm-detail'), 'back returns to the list');
+    assert(doc.querySelector('.jtm-row'), 'rows visible again');
+
+    // Escape closes the detail first, then the dashboard.
+    doc.querySelector('.jtm-hist').click();
+    doc.dispatchEvent(new env.win.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    assert(!doc.querySelector('.jtm-detail'), 'Escape leaves the history view');
+    assert(doc.getElementById('price-tracker-modal'), 'dashboard still open');
+    doc.dispatchEvent(new env.win.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    assert(!doc.getElementById('price-tracker-modal'), 'Escape then closes the dashboard');
+});
+
+// ── 14. The panel flags a listing change instead of celebrating a drop ──
+test('a renamed listing on a visit shows a panel warning, not a drop', async () => {
+    const key = 'p1';
+    const url = 'https://www.jumia.com.gh/p1.html';
+    const history = {
+        [key]: {
+            name: 'Original Smartphone 128GB', url, site: 'jumia', currency: 'GHS',
+            samples: [{ p: 1200, t: realNow - 2 * HOUR }], created: realNow - 9 * DAY,
+        },
+    };
+    const storage = { ...seedHistory(history), jumia_gh_coupons_last_fetch: realNow };
+    const env = await makeEnv({ url, storage, html: page(99, 'Phone Case Cover', url) });
+    for (let i = 0; i < 6; i++) await runDue(env, 2000);
+
+    const h = loadJSON(env, HISTORY_KEY)[key];
+    assert.strictEqual(h.samples.at(-1).lc, 'name', 'visit flagged the listing change');
+    assert(h.listingChangedAt, 'timestamp stored');
+
+    const panel = env.win.document.getElementById('price-tracker-panel');
+    const note = panel.querySelector('.jpt-listing');
+    assert(!note.hidden, 'panel warning visible');
+    assert(/listing changed/i.test(note.textContent), 'warning explains the change');
+    const stats = panel.querySelector('.jpt-stats').textContent;
+    assert(/0\.0%/.test(stats), 'change restarts after the swap');
+    assert(!/Drop:/.test(stats), 'no fake -99% drop line');
+    assert.strictEqual(env.win.__notifications.length, 0, 'no misleading notification');
 });
 
 (async () => {

@@ -323,6 +323,22 @@ The panel is draggable by its title bar, using the same pattern as the dashboard
 - A capture-phase `error` listener on the modal swaps broken images for the placeholder (image `error` events do not bubble).
 - Footer actions: Export, Import (merge), Fetch images, Clear All.
 
+#### Listing changes (`detectListingChange`)
+
+Seller edits can replace a product while keeping a trackable history entry (for example, an old URL that now redirects, or a reused slug). Such a swap would otherwise look like a catastrophic price drop.
+
+- `detectListingChange(prevSample, price, { oldName, newName, oldUrl, newUrl })` only fires on an extreme ratio (≤10% or ≥10× the previous price). It then corroborates with a low name-token Jaccard similarity (`< 0.34`) or a changed URL identity (`urlIdentity`: AliExpress item id, Jumia slug). A ≥98% drop or 50× rise is flagged even without corroboration.
+- Both `recordPrice` (page visits) and `applyWatchedPrice` (background checks) mark the new sample with `lc: 'name' | 'url' | 'price'` and set `listingChangedAt` on the product. `fetchWatchPage` returns `finalUrl` so a redirect target can be compared and stored.
+- `priceBaseline(p)` returns the newest `lc` sample; row low/high/change and the detail summary start there, so a swap resets the stats instead of poisoning them.
+- `latestChange` exposes `lc` so the dashboard can replace the numeric badge with `⚠ listing`; a detected swap suppresses drop and target-met notifications and does not count as a canary change.
+- The floating panel shows a 30-day `.jpt-listing` warning using `listingChangedAt`.
+
+#### Price history view (`renderHistoryDetail`)
+
+- `detailKey` (module scope) selects the detail view inside the dashboard body. `renderTrackedModal` renders it before the list, so background refreshes keep it open; `closeModal` clears it.
+- `priceChartSvg` draws a fixed-viewBox SVG polyline over every sample (times normalised across the full range), with an amber dot for `lc` samples and native `<title>` tooltips.
+- The change list is derived from consecutive differing samples, newest first, showing old → new, percentage, recording source, and listing marker. The summary uses `priceBaseline` while the chart intentionally keeps every sample.
+
 #### Window geometry (`openTrackedModal`)
 
 The modal is a floating window rather than a centered dialog:

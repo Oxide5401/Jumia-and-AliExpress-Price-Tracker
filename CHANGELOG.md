@@ -2,6 +2,16 @@
 
 All notable changes to this project are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions use `MAJOR.MINOR.PATCH`.
 
+## [3.9.0] — 2026-11-14
+
+### Added
+- **Seller-edit detection.** When a product's name or URL changes alongside an implausible price jump (a ≥98% drop or 50× rise), the sample is marked as a listing change (`lc`) and `listingChangedAt` is stored. Background checks also compare the redirect target, so a Jumia listing that now resolves to a different product is caught.
+- **Listing indicators.** Dashboard rows show an amber `⚠ listing` badge and tint instead of a fake `↓99.9%`; the floating panel shows a 30-day warning line. Low/high/change restart from the first sample after the swap, and no misleading drop or target notification is sent.
+- **Per-product price history.** A 📈 button on every dashboard row opens a detail view with an SVG chart of all samples and a newest-first list of every price change (old → new, %, source, and listing markers). Back or Escape returns to the list.
+
+### Changed
+- `fetchWatchPage` keeps the redirect target (`finalUrl`) so listing identity can be compared and the stored URL refreshed.
+
 ## [3.8.0] — 2026-11-14
 
 ### Added
