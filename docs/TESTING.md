@@ -132,6 +132,7 @@ These are the assertions worth keeping when changing extraction, storage, or UI.
 - The dashboard exposes `.jtm-min`, `.jtm-max-btn`, `.jtm-close`, `.jtm-snap`, and `.jtm-resize`. Dragging within `SNAP_PX` of an edge snaps flush and adds `.jtm-snapped`; Alt bypasses snapping; the 🧲 toggle disables it.
 - Maximize fills the viewport, restore returns to the previous rectangle, minimize collapses to the title bar, and closing removes the modal.
 - Dragging/resizing persists `{ x, y, w, h, max, snap }` to `jumia_gh_dash_window`; reopening restores it.
+- The floating panel exposes `.jpt-header`; a pointer drag sets inline `left/top`, clears `right/bottom`, and stores `{ x, y }` in `jumia_gh_panel_pos`. Dragging past an edge clamps the panel inside the viewport, a fresh load restores the saved spot, and a header double-click clears both the style and the key.
 
 ### Smart watch
 - **304:** a stored `ETag` is sent as `If-None-Match`; a `304` adds no sample, increments misses, and pushes `nextCheck` forward.
@@ -191,6 +192,7 @@ The UI must remain readable.
 - [ ] Resize from the bottom-right grip: the window respects a minimum size and snaps to the right/bottom edges.
 - [ ] Minimize → only the title bar remains; restore. Maximize → full viewport; restore. Double-click the title bar also toggles maximize.
 - [ ] Close with × and with Escape. Reopen: position, size, maximized state, and snap preference are restored.
+- [ ] Drag the floating panel by its title bar; reload the page and confirm it reopens in the same spot. Double-click the title bar to snap it back to the bottom-right corner.
 - [ ] Change price via DevTools before Refresh: drop notification fires at ≥5%.
 - [ ] Coupons: **Find Coupons** populates the list; clicking a code copies it; **all** toggles.
 - [ ] **Fetch images** fills thumbnails for products without images; a second click resumes.

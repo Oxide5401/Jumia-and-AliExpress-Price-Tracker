@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jumia Ghana – Price Tracker + Coupons + Dashboard
 // @namespace    https://github.com/yourname/jumia-price-tracker
-// @version      3.7.0
+// @version      3.8.0
 // @description  Robust price tracker with product images, persistent coupon finder, and tracking dashboard for jumia.com.gh and aliexpress.com (Ghana / GHS)
 // @author       Oxide5401
 // @homepageURL  https://github.com/Oxide5401/Jumia-and-AliExpress-Price-Tracker
@@ -91,6 +91,7 @@
         uiPanelId: 'price-tracker-panel',
         trackedModalId: 'price-tracker-modal',
         dashWindowKey: 'jumia_gh_dash_window',
+        panelPosKey: 'jumia_gh_panel_pos',
         notificationTimeout: 10000,
         couponPageUrls: SITE.couponPageUrls,
         couponCacheTTLMs: 6 * 60 * 60 * 1000,
@@ -1618,7 +1619,7 @@
         const panel = document.createElement('div');
         panel.id = CONFIG.uiPanelId;
         panel.innerHTML = `
-            <div class="jpt-header">
+            <div class="jpt-header" title="Drag to move · double-click to reset position">
                 <span class="jpt-title">💰 Price Tracker</span>
                 <span class="jpt-site">${escapeHtml(SITE.shortLabel)}</span>
                 <button class="jpt-tracked-btn" title="View all tracked products">📊 <span class="jpt-tracked-count">0</span></button>
@@ -1664,7 +1665,11 @@
                 display: flex; align-items: center; gap: 6px;
                 padding: 8px 12px; background: #f5f5f5; border-bottom: 1px solid #ddd;
                 border-radius: 8px 8px 0 0; font-weight: 600;
+                cursor: grab; user-select: none; touch-action: none;
             }
+            #${CONFIG.uiPanelId}.jpt-dragging .jpt-header { cursor: grabbing; }
+            #${CONFIG.uiPanelId}.jpt-dragging { user-select: none; }
+            #${CONFIG.uiPanelId}.jpt-dragging .jpt-body { pointer-events: none; }
             #${CONFIG.uiPanelId} .jpt-title { flex: 1; }
             #${CONFIG.uiPanelId} .jpt-site {
                 font-size: 10px; font-weight: 700; letter-spacing: .3px;
@@ -1738,16 +1743,122 @@
             #${CONFIG.uiPanelId} .jpt-coupon-desc { font-size: 11px; color: #666; line-height: 1.3; }
             #${CONFIG.uiPanelId} .jpt-no-coupons { color: #999; font-size: 12px; padding: 6px 0; text-align: center; }
             #${CONFIG.uiPanelId} .jpt-toast {
-                position: fixed; bottom: 30px; right: 370px;
+                position: absolute; left: 50%; bottom: 10px; transform: translateX(-50%);
                 background: #333; color: #fff; padding: 8px 14px;
                 border-radius: 6px; font-size: 12px; opacity: 0;
                 transition: opacity .25s; pointer-events: none; z-index: 100000;
+                white-space: nowrap; max-width: 90%;
             }
             #${CONFIG.uiPanelId} .jpt-toast.show { opacity: 1; }
         `);
 
+        // ── Movable panel: drag the header, remember the position ──
+        // With no saved position the panel keeps its default bottom-right
+        // anchor; once moved it switches to absolute left/top coordinates.
+        const headerEl = panel.querySelector('.jpt-header');
+        const panelCleanups = [];
+        const listen = (target, type, fn, opts) => {
+            target.addEventListener(type, fn, opts);
+            const off = () => target.removeEventListener(type, fn, opts);
+            panelCleanups.push(off);
+            return off;
+        };
+        const viewport = () => ({
+            w: Math.max(280, window.innerWidth || document.documentElement.clientWidth || 1024),
+            h: Math.max(240, window.innerHeight || document.documentElement.clientHeight || 768),
+        });
+        const clampPos = p => {
+            const vp = viewport();
+            const w = panel.offsetWidth || 330;
+            const h = panel.offsetHeight || 300;
+            return {
+                x: Math.max(0, Math.min(p.x, Math.max(0, vp.w - w))),
+                y: Math.max(0, Math.min(p.y, Math.max(0, vp.h - h))),
+            };
+        };
+        const applyPos = () => {
+            if (!pos) return;
+            pos = clampPos(pos);
+            panel.style.left = Math.round(pos.x) + 'px';
+            panel.style.top = Math.round(pos.y) + 'px';
+            panel.style.right = 'auto';
+            panel.style.bottom = 'auto';
+        };
+        const savePos = () => {
+            if (!pos) return;
+            try {
+                GM_setValue(CONFIG.panelPosKey, JSON.stringify({
+                    x: Math.round(pos.x), y: Math.round(pos.y),
+                }));
+            } catch (e) { warn('Could not save panel position:', e.message); }
+        };
+        const readPos = () => {
+            try {
+                const raw = GM_getValue(CONFIG.panelPosKey, '');
+                const o = typeof raw === 'string' ? JSON.parse(raw) : raw;
+                if (!o || typeof o !== 'object') return null;
+                if (!['x', 'y'].every(k => typeof o[k] === 'number' && isFinite(o[k]))) return null;
+                return { x: o.x, y: o.y };
+            } catch { return null; }
+        };
+        let pos = readPos();
+        if (pos) applyPos();
+
+        const closePanel = () => {
+            while (panelCleanups.length) {
+                try { panelCleanups.pop()(); } catch { /* ignore */ }
+            }
+            savePos();
+            panel.remove();
+        };
+        const resetPos = () => {
+            pos = null;
+            try { GM_setValue(CONFIG.panelPosKey, ''); } catch { /* ignore */ }
+            panel.style.left = '';
+            panel.style.top = '';
+            panel.style.right = '';
+            panel.style.bottom = '';
+        };
+
+        headerEl.addEventListener('pointerdown', e => {
+            if (e.button !== 0) return;
+            if (e.target.closest('button, input, select, textarea, a, label')) return;
+            e.preventDefault();
+            const rect = panel.getBoundingClientRect();
+            pos = { x: rect.left, y: rect.top };
+            const start = { px: e.clientX, py: e.clientY, x: pos.x, y: pos.y };
+            panel.classList.add('jpt-dragging');
+            try { headerEl.setPointerCapture(e.pointerId); } catch { /* optional */ }
+            const move = ev => {
+                pos.x = start.x + (ev.clientX - start.px);
+                pos.y = start.y + (ev.clientY - start.py);
+                applyPos();
+            };
+            const up = () => {
+                panel.classList.remove('jpt-dragging');
+                try { headerEl.releasePointerCapture(e.pointerId); } catch { /* optional */ }
+                offMove();
+                offUp();
+                savePos();
+            };
+            const offMove = listen(window, 'pointermove', move);
+            const offUp = listen(window, 'pointerup', up);
+        });
+
+        headerEl.addEventListener('dblclick', e => {
+            if (e.target.closest('button, input, select, textarea, a, label')) return;
+            resetPos();
+        });
+        listen(window, 'resize', applyPos);
+        if (typeof ResizeObserver === 'function') {
+            // Keep the whole panel on-screen when the coupon list grows.
+            const ro = new ResizeObserver(() => applyPos());
+            ro.observe(panel);
+            panelCleanups.push(() => ro.disconnect());
+        }
+
         const toast = panel.querySelector('.jpt-toast');
-        panel.querySelector('.jpt-close').addEventListener('click', () => panel.remove());
+        panel.querySelector('.jpt-close').addEventListener('click', closePanel);
         panel.querySelector('.jpt-refresh').addEventListener('click', () => {
             const r = recordPrice(); updatePanel(r); updateTrackedBadge();
         });

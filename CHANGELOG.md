@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions use `MAJOR.MINOR.PATCH`.
 
+## [3.8.0] — 2026-11-14
+
+### Added
+- **Movable floating panel.** Drag the price-tracker panel by its title bar to move it anywhere on the page. The position is stored under `jumia_gh_panel_pos` and restored on reload, so the panel reopens exactly where you left it.
+- **Reset shortcut.** Double-click the title bar to return the panel to its default bottom-right corner and clear the saved position.
+- The panel is clamped to the viewport (including after a browser resize), and the coupon toast now follows the panel instead of staying in the corner.
+
 ## [3.7.0] — 2026-11-13
 
 ### Added

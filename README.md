@@ -2,7 +2,7 @@
 
 A single Tampermonkey/Violentmonkey userscript that tracks product prices on **Jumia Ghana** (`jumia.com.gh`) and **AliExpress** (Ghana shipping, GHS), finds and stores coupon codes, and shows everything in one dashboard — including **product thumbnails**.
 
-![Version](https://img.shields.io/badge/version-3.7.0-orange)
+![Version](https://img.shields.io/badge/version-3.8.0-orange)
 ![License](https://img.shields.io/badge/license-MIT-blue)
 ![Platform](https://img.shields.io/badge/platform-Tampermonkey%20%7C%20Violentmonkey-2ea44f)
 
@@ -170,6 +170,7 @@ Your data is still attached to the original script. Rescue it like this:
 | **Find Coupons** | Scans this page and the site's coupon pages immediately. |
 | **Clear** | Removes this product from history and clears the site's coupon cache. Treats the site's cache as disposable; your other tracked products are untouched. |
 | Coupons list | Ranked codes; click one to copy it. Tick **all** to see every cached code. |
+| Title bar | Drag to move the panel anywhere; double-click it to snap back to the bottom-right corner. The position is remembered across reloads. |
 
 Prices are recorded automatically shortly after a product page loads. If extraction fails, the script retries with a site-specific backoff (20 attempts on Jumia, 40 on AliExpress).
 
@@ -294,6 +295,7 @@ All data stays in your browser, inside your userscript manager's storage. There 
 | `jumia_gh_smart_watch` | both sites | Whether the opt-in smart watch is enabled (`true`/`false`). |
 | `jumia_gh_smart_watch_state` | both sites | Scheduler state: per-product due dates, validators, canary signals, budget, host backoff (JSON). |
 | `jumia_gh_dash_window` | both sites | Dashboard window position, size, maximized state, and snap preference (JSON). |
+| `jumia_gh_panel_pos` | both sites | Floating panel position (`{ x, y }`), set once the panel has been dragged. |
 
 ### History schema
 
@@ -450,7 +452,7 @@ npm install jsdom
 node tests/smartwatch.test.cjs
 ```
 
-Smart-watch tests should cover: `304` handling, the daily budget cap, canary campaign detection, target prioritisation, AliExpress skipping, visit-side metadata updates, target merging, open-dashboard refresh with change badges, and window geometry (drag, snap, maximize, minimize, persistence). A headless Chromium screenshot is useful for layout checks:
+Smart-watch tests should cover: `304` handling, the daily budget cap, canary campaign detection, target prioritisation, AliExpress skipping, visit-side metadata updates, target merging, open-dashboard refresh with change badges, dashboard window geometry (drag, snap, maximize, minimize, persistence), and panel dragging/persistence. A headless Chromium screenshot is useful for layout checks:
 
 ```bash
 msedge --headless=new --disable-gpu --hide-scrollbars \
@@ -483,7 +485,7 @@ The project follows a pragmatic `MAJOR.MINOR.PATCH` scheme:
 - **MINOR** — new sites, major features, new dashboard capabilities.
 - **PATCH** — bug fixes, selector updates, styling and documentation fixes.
 
-Current release: **3.7.0** — a movable, resizable dashboard window with smart edge snapping, minimize/maximize, and remembered geometry. See [`CHANGELOG.md`](CHANGELOG.md).
+Current release: **3.8.0** — the floating panel can be dragged anywhere and reopens where you left it. See [`CHANGELOG.md`](CHANGELOG.md).
 
 ---
 

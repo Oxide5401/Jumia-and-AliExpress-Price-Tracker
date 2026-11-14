@@ -531,6 +531,65 @@ test('dashboard window controls drag, snap, maximize, minimize and persist geome
     assert.strictEqual(reopened.style.left, '0px', 'saved position restored');
 });
 
+// ── 11. Mini panel: drag by its header, remember the position ──────────
+test('mini panel can be dragged and remembers its position', async () => {
+    const env = await makeEnv({ storage: { jumia_gh_coupons_last_fetch: realNow } });
+    Object.defineProperty(env.win, 'innerWidth', { value: 1000, configurable: true });
+    Object.defineProperty(env.win, 'innerHeight', { value: 700, configurable: true });
+
+    const doc = env.win.document;
+    const panel = doc.getElementById('price-tracker-panel');
+    assert(panel, 'panel exists');
+    const header = panel.querySelector('.jpt-header');
+    const ptr = (type, x, y, extra = {}) => new env.win.MouseEvent(type, {
+        bubbles: true, cancelable: true, clientX: x, clientY: y, button: 0, ...extra,
+    });
+
+    // Drag away from the default bottom-right corner. (jsdom reports a
+    // zero-origin rect, so deltas come straight from the pointer offsets.)
+    header.dispatchEvent(ptr('pointerdown', 0, 0));
+    env.win.dispatchEvent(ptr('pointermove', 150, 120));
+    assert(panel.classList.contains('jpt-dragging'), 'drag state shown');
+    assert.strictEqual(panel.style.left, '150px', 'moved horizontally');
+    assert.strictEqual(panel.style.top, '120px', 'moved vertically');
+    assert.strictEqual(panel.style.right, 'auto', 'right anchor released');
+    assert.strictEqual(panel.style.bottom, 'auto', 'bottom anchor released');
+    env.win.dispatchEvent(ptr('pointerup', 150, 120));
+    assert(!panel.classList.contains('jpt-dragging'), 'drag state cleared');
+    assert.strictEqual(JSON.parse(env.store.get('jumia_gh_panel_pos')).x, 150, 'x persisted');
+    assert.strictEqual(JSON.parse(env.store.get('jumia_gh_panel_pos')).y, 120, 'y persisted');
+
+    // Dragging past the edge clamps the panel inside the viewport.
+    header.dispatchEvent(ptr('pointerdown', 150, 120));
+    env.win.dispatchEvent(ptr('pointermove', 5000, 5000));
+    assert.strictEqual(panel.style.left, '670px', 'clamped to the right edge');
+    assert.strictEqual(panel.style.top, '400px', 'clamped to the bottom edge');
+    env.win.dispatchEvent(ptr('pointerup', 5000, 5000));
+
+    // Closing keeps the position for the next page load.
+    panel.querySelector('.jpt-close').click();
+    assert(!doc.getElementById('price-tracker-panel'), 'panel closed');
+
+    // A fresh page restores the saved position.
+    const env2 = await makeEnv({ storage: Object.fromEntries(env.store) });
+    Object.defineProperty(env2.win, 'innerWidth', { value: 1000, configurable: true });
+    Object.defineProperty(env2.win, 'innerHeight', { value: 700, configurable: true });
+    const panel2 = env2.win.document.getElementById('price-tracker-panel');
+    assert(panel2, 'panel recreated');
+    // Layout runs on open, so re-read the saved value through a resize tick.
+    env2.win.dispatchEvent(new env2.win.Event('resize'));
+    assert.strictEqual(panel2.style.left, '670px', 'saved x restored');
+    assert.strictEqual(panel2.style.top, '400px', 'saved y restored');
+
+    // Double-clicking the header resets it to the default corner.
+    panel2.querySelector('.jpt-header').dispatchEvent(
+        new env2.win.MouseEvent('dblclick', { bubbles: true, cancelable: true })
+    );
+    assert.strictEqual(panel2.style.left, '', 'reset clears left');
+    assert.strictEqual(panel2.style.top, '', 'reset clears top');
+    assert.strictEqual(env2.store.get('jumia_gh_panel_pos'), '', 'reset clears storage');
+});
+
 (async () => {
     let failed = 0;
     for (const t of tests) {

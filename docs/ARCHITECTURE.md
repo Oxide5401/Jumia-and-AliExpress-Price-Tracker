@@ -292,11 +292,20 @@ Web sync honours `CONFIG.couponCacheTTLMs` (6 hours) unless forced by **Find Cou
 ## 9. UI
 
 ### Panel (`createPanel`)
-- Fixed, bottom-right, isolated by a unique ID.
+- Fixed, bottom-right by default, isolated by a unique ID.
 - One `GM_addStyle` block; explicit colours and `color-scheme: only light`.
 - `updatePanel(result)` sets the product name (`displayName`), thumbnail (`setThumb`), current price, stats, and drop message.
 - `renderCoupons()` rebuilds the coupon list from the cache on demand.
 - Buttons wire directly to `recordPrice`, `refreshCouponsFromWeb`, storage clears, and the dashboard.
+
+#### Panel position (`createPanel`)
+
+The panel is draggable by its title bar, using the same pattern as the dashboard window:
+
+- The default anchor stays CSS `bottom/right`. As soon as the user drags, the panel switches to `left/top` pixels and clears the anchors.
+- `jumia_gh_panel_pos` stores `{ x, y }`; `clampPos` keeps the whole panel inside the viewport, including after `resize`. A zero-sized panel (not yet laid out) falls back to 330×300 for clamping.
+- Pointer move/up handlers are registered on `window` through a tracked `listen` helper; `closePanel` removes them and persists the last position. A title-bar double-click clears both the style and the stored key, restoring the bottom-right default.
+- The coupon toast is positioned absolutely inside the panel so it follows the panel after a move.
 
 ### Dashboard (`openTrackedModal` / `renderTrackedModal`)
 - Modal with a fixed backdrop, smart-watch bar, toolbar, list, import overlay, and footer actions.
