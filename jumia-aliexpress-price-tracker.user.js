@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jumia Ghana – Price Tracker + Coupons + Dashboard
 // @namespace    https://github.com/yourname/jumia-price-tracker
-// @version      3.9.0
+// @version      3.10.0
 // @description  Robust price tracker with product images, persistent coupon finder, and tracking dashboard for jumia.com.gh and aliexpress.com (Ghana / GHS)
 // @author       Oxide5401
 // @homepageURL  https://github.com/Oxide5401/Jumia-and-AliExpress-Price-Tracker
@@ -84,6 +84,7 @@
         storageKey: 'jumia_gh_price_history',
         couponStorageKey: IS_ALI ? 'aliexpress_coupons' : 'jumia_gh_coupons',
         couponLastSyncKey: IS_ALI ? 'aliexpress_coupons_last_fetch' : 'jumia_gh_coupons_last_fetch',
+        couponRetryKey: IS_ALI ? 'aliexpress_coupons_retry_after' : 'jumia_gh_coupons_retry_after',
         couponShowAllKey: IS_ALI ? 'aliexpress_coupons_show_all' : 'jumia_gh_coupons_show_all',
         maxSamplesPerProduct: 120,
         maxProducts: 200,
@@ -95,6 +96,7 @@
         notificationTimeout: 10000,
         couponPageUrls: SITE.couponPageUrls,
         couponCacheTTLMs: 6 * 60 * 60 * 1000,
+        couponRetryMs: 10 * 60 * 1000,
         maxCoupons: 500,
         extractAttempts: SITE.extractAttempts,
         extractDelayMs: SITE.extractDelayMs,
@@ -1409,9 +1411,15 @@
         'MODULE','MODULES','CONTENT','NAVBAR','SIDEBAR','HEADER','FOOTER','BODY',
         'JUMIA','JUMIAGH','GHANA',
         'ALIEXPRESS','ALIBABA','EXPRESS','SUPERDEALS',
+        'JUMIAGHANA','JUMIASHOP','ALIEXPRESSPROMO',
         'INFO','SHOW','HIDE','EDIT','DELETE','REMOVE','ADD','UPDATE','CHANGE',
         'SELECT','CHOOSE','YES','NO','OK','BACK','FORWARD',
         'SKIP','MAIN','NAVIGATE','NAVIGATION','SIGN',
+        'COPY','COPIED','CLICK','TAP','SEE','VIEWALL','SHIPPING','DELIVERY',
+        'EXPIRES','EXPIRED','EXPIRY','VALID','VALIDUNTIL','ONLY','NOW','TODAY',
+        'ENDS','START','PERCENT','PERCENTOFF','DISCOUNTS','REDEEM','GIFT',
+        'CURRENCY','AMOUNT','MINIMUM','PURCHASE','TAB','TABS','PAGE','PAGES',
+        'SCROLL','LOAD','REFRESH','SEARCH','FILTER','SORT','NEXT','PREV',
     ]);
 
     // Substring rejections — only long, unambiguous UI phrases that could not
@@ -1421,18 +1429,61 @@
         'MODULE','MODULES',
         'NAVBAR','SIDEBAR',
         'NEWSLETTER','SUBSCRIBE',
-        'JUMIA','ALIEXPRESS',
+        'CAPTCHA','COOKIEPOLICY','PRIVACYPOLICY',
+    ];
+
+    // Words that can follow "promo code" in a sentence but are not codes.
+    // Only consulted for letter-only candidates from context phrases.
+    const CONTEXT_NOISE = new Set([
+        'AVAILABLE','APPLICABLE','ELIGIBLE','QUALIFYING','SELECTED','WORKING',
+        'ACTIVE','ORDERS','PURCHASE','CUSTOMERS','SHOPPERS','EVERYTHING',
+        'EXCLUSIVE','INCLUDED','REQUIRED','BELOW','ABOVE','FOLLOWING','LISTED',
+    ]);
+
+    // Values that look code-shaped but are really prices, specs, dates, or
+    // tracking numbers. Checked against the normalised, upper-cased string.
+    const NOISE_PATTERNS = [
+        /^(?:GHS|USD|EUR|GBP|NGN|KES|ZAR|CNY|AED|SAR|CAD|AUD)\d{1,6}$/, // GHS50
+        /^\d{1,6}(?:GHS|USD|EUR|GBP|NGN|KES|ZAR|CNY|AED|SAR)$/,         // 50GHS
+        /^\d+[.,]\d+$/,                                                  // 10.50 / 10,50
+        /^(?:19|20)\d{2}$/,                                              // 2024
+        /^\d{1,2}(?:AM|PM)$/,                                            // 9AM
+        /^\d+(?:GB|TB|MB|KB|MAH|ML|KG|MM|CM|PCS|PK|W|V)$/,               // 128GB
+        /^\d+X\d+$/,                                                     // 20X30
+        /^0\d{5,}$/,                                                     // 0012345
+        /^\d+[A-Z]{1,2}\d{6,}$/,                                         // long tracking IDs
     ];
 
     // Context patterns. \b around keyword + tight window + \b around code.
-    // Supports full-width colon so AliExpress campaign pages ("Code：AE10") match.
-    const CONTEXT_RE = /\b(?:promo\s*code|coupon\s*code|voucher\s*code|discount\s*code|code|coupon|voucher|promo)\b[\s:：\-=]{0,4}([A-Z0-9][A-Z0-9\-_]{3,15})\b/gi;
+    // Supports full-width colon so AliExpress campaign pages ("Code：AE10") match,
+    // plus optional quotes/brackets around the code ("use code 'SAVE10'").
+    // The first group is the keyword so bare "coupon" cannot capture an
+    // adjective from "coupon available for all users".
+    const CONTEXT_RE = /\b(promo\s*code|coupon\s*code|voucher\s*code|discount\s*code|gift\s*code|code|coupon|voucher|promo|redeem\s*code)\b([\s:：\-=–—]{0,4})[“"'‘(\[]?\s*([A-Z0-9][A-Z0-9\-_]{3,19})\b/gi;
+
+    // Attributes that commonly carry a copyable coupon code.
+    const COUPON_ATTRS = [
+        'data-code', 'data-coupon', 'data-coupon-code', 'data-voucher-code',
+        'data-promo-code', 'data-clipboard-text', 'data-copy', 'data-copy-text',
+    ];
 
     // Elements likely to hold a coupon code.
     const COUPON_SELECTORS = [
         '[class*="coupon"]', '[class*="voucher"]', '[class*="promo"]',
         '[id*="coupon"]', '[id*="voucher"]', '[id*="promo"]',
+        ...COUPON_ATTRS.map(a => `[${a}]`),
     ].join(',');
+
+    /** Normalises quote/bracket wrappers and invisible characters. */
+    function normalizeCoupon(raw) {
+        return String(raw == null ? '' : raw)
+            .normalize('NFKC')
+            .replace(/[\u200B-\u200D\u2060\uFEFF]/g, '')
+            .trim()
+            .replace(/^[\s"'“”‘’`#(\[{<.,;:!?%]+/, '')
+            .replace(/[\s"'“”‘’`)\]}>,.;:!?%]+$/, '')
+            .trim();
+    }
 
     /** Detects repeated substrings: HELPHELP, ABCABC, ABABAB… */
     function hasRepeatPattern(s) {
@@ -1455,17 +1506,25 @@
      * @param {{strict?: boolean}} [opts] - strict = require a digit (body-text tier)
      */
     function isPlausibleCoupon(raw, opts = {}) {
-        if (!raw) return false;
-        const s = String(raw).toUpperCase().trim();
+        const s = normalizeCoupon(raw).toUpperCase();
+        if (!s) return false;
 
-        // Length bounds
-        if (s.length < 4 || s.length > 16) return false;
+        // Length bounds. 4 is the shortest believable code; 20 covers campaign
+        // codes without opening the door to whole sentences.
+        if (s.length < 4 || s.length > 20) return false;
+
+        // Real codes never contain spaces or line breaks.
+        if (/\s/.test(s)) return false;
 
         // Char set — alnum with optional -/_ inside, alnum at both ends
         if (!/^[A-Z0-9][A-Z0-9\-_]*[A-Z0-9]$/.test(s)) return false;
 
-        // Reject pure-digit strings longer than 6 (SKUs, barcodes, order IDs)
-        if (/^\d{7,}$/.test(s)) return false;
+        // Prices, specs, dates, and identifiers that merely look code-shaped.
+        for (const re of NOISE_PATTERNS) if (re.test(s)) return false;
+
+        // A promo code practically always contains a letter. This rejects
+        // prices ("5000"), quantities, and numeric IDs.
+        if (!/[A-Z]/.test(s)) return false;
 
         // Exact-word noise
         if (NOISE_EXACT.has(s)) return false;
@@ -1482,104 +1541,327 @@
         // Strict tier: body-text matches MUST contain a digit.
         if (opts.strict && !hasDigit) return false;
 
-        // Lenient tier: no digit AND no punctuation → cap at 10 chars.
+        // Lenient tier: no digit AND no punctuation → cap at 12 chars.
         // Blocks "CONGRATULATIONS", "WELCOMETOSTORE", etc.
-        if (!hasDigit && !hasPunct && s.length > 10) return false;
+        if (!hasDigit && !hasPunct && s.length > 12) return false;
 
         return true;
     }
 
-    function findDescription(el, code) {
-        if (!el) return '';
-        const t = (el.textContent || '').trim();
-        return t.replace(new RegExp(code, 'i'), '').replace(/\s+/g, ' ').trim().slice(0, 160);
+    /** Escapes a string for safe use inside a RegExp. */
+    function escapeRegExp(s) {
+        return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     }
 
     /**
-     * Only stores codes that pass isPlausibleCoupon.
-     * Caller is responsible for validation; this is a pure insert.
+     * Reads visible-ish text with spaces between child elements. Inline
+     * markup often concatenates ("ISO31Expires…"), which would otherwise
+     * invent fake codes at element boundaries.
      */
-    function addCoupon(map, raw, el, source, now) {
-        const code = String(raw).toUpperCase().trim();
-        if (!isPlausibleCoupon(code, { strict: false })) return;
-        if (map.has(code)) { map.get(code).lastSeen = now; return; }
+    function elementText(el) {
+        if (!el) return '';
+        if (!el.childNodes || !el.childNodes.length)
+            return String(el.textContent || '').replace(/\s+/g, ' ').trim();
+        const parts = [];
+        const walk = node => {
+            if (node.nodeType === 3) {
+                const t = String(node.nodeValue || '').replace(/\s+/g, ' ').trim();
+                if (t) parts.push(t);
+            } else if (node.nodeType === 1 && node.childNodes) {
+                node.childNodes.forEach(walk);
+            }
+        };
+        walk(el);
+        return parts.join(' ').replace(/\s+/g, ' ').trim();
+    }
 
-        const description = el ? findDescription(el, code) : '';
-        // Parse a display-only expiry from surrounding text (never used to delete).
-        const expiry = parseExpiry(description || (el?.textContent || ''));
-        map.set(code, {
-            code, description, source,
+    /**
+     * Best-effort human description for a coupon card. Pulls accessible text
+     * (aria-label/title/value) as well as visible text, removes every mention
+     * of the code itself, and strips copy-button chatter.
+     */
+    function findDescription(el, code) {
+        if (!el) return '';
+        const attr = name => (typeof el.getAttribute === 'function' ? el.getAttribute(name) : '') || '';
+        const bits = [
+            attr('aria-label'), attr('title'),
+            typeof el.value === 'string' ? el.value : '',
+            elementText(el),
+        ].filter(Boolean);
+        if (!bits.length) return '';
+
+        let t = bits.join(' ');
+        if (code) t = t.replace(new RegExp(escapeRegExp(code), 'gi'), ' ');
+        t = t.replace(/[\u200B-\u200D\u2060\uFEFF]/g, '');
+        t = t.replace(/[“”"'‘’`]/g, ' ');
+        t = t.replace(/\b(?:copy(?: code)?|copied|tap to copy|use code|reden?eem)\b/gi, ' ');
+        t = t.replace(/\s+/g, ' ').trim();
+        t = t.replace(/^[\s:：,.;\-–—]+|[\s:：,.;\-–—]+$/g, '').trim();
+        return t.slice(0, 160);
+    }
+
+    const CONFIDENCE_RANK = { low: 1, medium: 2, high: 3 };
+
+    /**
+     * Inserts or upgrades one coupon in a transient extraction map.
+     * Callers pass the confidence implied by where the code was found.
+     */
+    function addCoupon(map, raw, el, source, now, confidence = 'medium', description) {
+        const code = normalizeCoupon(raw).toUpperCase();
+        if (!isPlausibleCoupon(code, { strict: false })) return null;
+
+        const ctx = description != null ? String(description) : (el ? findDescription(el, code) : '');
+        const text = `${ctx} ${el ? elementText(el) : ''}`;
+        const expiry = parseExpiry(text);
+
+        const existing = map.get(code);
+        if (existing) {
+            existing.lastSeen = Math.max(existing.lastSeen || 0, now);
+            existing.hits = (existing.hits || 1) + 1;
+            if (CONFIDENCE_RANK[confidence] > CONFIDENCE_RANK[existing.confidence || 'medium'])
+                existing.confidence = confidence;
+            if (ctx && ctx.length > (existing.description || '').length) existing.description = ctx;
+            if (expiry && (!existing.expiry || expiry > existing.expiry)) existing.expiry = expiry;
+            return existing;
+        }
+
+        const rec = {
+            code, description: ctx || '', source,
             firstSeen: now, lastSeen: now,
             expiry: expiry || null,
             hits: 1,
-        });
+            confidence,
+        };
+        map.set(code, rec);
+        return rec;
     }
 
-    function parseExpiry(text) {
-        if (!text) return null;
-        let m = text.match(/(\d{4})-(\d{2})-(\d{2})/);
-        if (m) return new Date(+m[1], +m[2] - 1, +m[3], 23, 59, 59).getTime();
-        m = text.match(/(\d{1,2})\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+(\d{4})/i);
-        if (m) {
-            const mo = { jan:0,feb:1,mar:2,apr:3,may:4,jun:5,jul:6,aug:7,sep:8,oct:9,nov:10,dec:11 };
-            return new Date(+m[3], mo[m[2].toLowerCase().slice(0,3)], +m[1], 23, 59, 59).getTime();
-        }
-        m = text.match(/(\d{1,2})\/(\d{1,2})\/(\d{4})/);
-        if (m) return new Date(+m[3], +m[1] - 1, +m[2], 23, 59, 59).getTime();
-        return null;
+    const MONTH_INDEX = {
+        jan: 0, feb: 1, mar: 2, apr: 3, may: 4, jun: 5,
+        jul: 6, aug: 7, sep: 8, oct: 9, nov: 10, dec: 11,
+    };
+
+    /** Validated local end-of-day timestamp, or null for impossible dates. */
+    function endOfDay(y, m, d) {
+        const dt = new Date(y, m, d, 23, 59, 59, 999);
+        if (dt.getFullYear() !== y || dt.getMonth() !== m || dt.getDate() !== d) return null;
+        return dt.getTime();
+    }
+
+    function addDays(ms, days) {
+        const dt = new Date(ms);
+        dt.setDate(dt.getDate() + days);
+        return dt.getTime();
     }
 
     /**
-     * Two-tier extraction:
-     *   Tier A — elements whose class/id clearly marks them as coupon fields.
-     *   Tier B — page body text, but ONLY when the digit requirement is met.
+     * Display-only expiry parsing. It never deletes coupons; an unparseable
+     * date simply leaves `expiry` empty. Supports ISO, "30 Nov 2026",
+     * "Nov 30, 2026", day/month without a year, relative windows, and
+     * today/tomorrow phrasing.
+     */
+    function parseExpiry(text) {
+        if (!text) return null;
+        const t = String(text).normalize('NFKC').replace(/\s+/g, ' ').slice(0, 400);
+        const now = Date.now();
+        let m;
+
+        // 2026-11-30, optionally with a time.
+        m = t.match(/(\d{4})-(\d{2})-(\d{2})(?:[T ](\d{2}):(\d{2})(?::(\d{2}))?)?/);
+        if (m) {
+            const y = +m[1], mo = +m[2] - 1, d = +m[3];
+            const dt = new Date(y, mo, d,
+                m[4] != null ? +m[4] : 23, m[5] != null ? +m[5] : 59, m[6] != null ? +m[6] : 59);
+            if (dt.getFullYear() === y && dt.getMonth() === mo && dt.getDate() === d) return dt.getTime();
+            return null;
+        }
+
+        // 30 Nov 2026 / 30th November 2026
+        m = t.match(/\b(\d{1,2})(?:st|nd|rd|th)?\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?,?\s+(\d{4})\b/i);
+        if (m) return endOfDay(+m[3], MONTH_INDEX[m[2].toLowerCase().slice(0, 3)], +m[1]);
+
+        // Nov 30, 2026
+        m = t.match(/\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+(\d{4})\b/i);
+        if (m) return endOfDay(+m[3], MONTH_INDEX[m[1].toLowerCase().slice(0, 3)], +m[2]);
+
+        // 30 Nov (no year): this year unless that is already well past.
+        m = t.match(/\b(\d{1,2})(?:st|nd|rd|th)?\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\b/i);
+        if (m) {
+            const mo = MONTH_INDEX[m[2].toLowerCase().slice(0, 3)];
+            const year = new Date(now).getFullYear();
+            let ts = endOfDay(year, mo, +m[1]);
+            if (ts == null) return null;
+            if (ts < now - 30 * 24 * 60 * 60 * 1000) ts = endOfDay(year + 1, mo, +m[1]);
+            return ts;
+        }
+
+        // 30/11/2026 or 30.11.26 (day-first for Ghana); month-first when the
+        // first component cannot be a day.
+        m = t.match(/\b(\d{1,2})[\/.](\d{1,2})[\/.](\d{2,4})\b/);
+        if (m) {
+            let a = +m[1], b = +m[2];
+            const year = m[3].length === 2 ? 2000 + +m[3] : +m[3];
+            let day = a, month = b;
+            if (a <= 12 && b > 12) { month = a; day = b; }
+            return endOfDay(year, month - 1, day);
+        }
+
+        // Relative windows: "in 3 days", "valid for 7 days", "2 weeks left".
+        m = t.match(/\b(?:in|within|valid\s+for|expires?\s+in|ends?\s+in)\s+(\d{1,3})\s*(day|week|month)s?\b/i) ||
+            t.match(/\b(\d{1,3})\s*(day|week|month)s?\s*(?:left|remaining)\b/i);
+        if (m) {
+            const n = +m[1];
+            const unit = m[2].toLowerCase();
+            const days = unit === 'day' ? n : unit === 'week' ? n * 7 : n * 30;
+            if (days > 0 && days <= 730) return addDays(now, days);
+        }
+
+        // today / tonight / tomorrow, but only in an expiry-ish phrase.
+        m = t.match(/\b(?:expires?|valid|ends?|until|use\s+before|only)\b[^.]{0,24}\b(today|tonight|tomorrow)\b/i) ||
+            t.match(/^(today|tonight|tomorrow)$/i);
+        if (m) {
+            const word = m[1].toLowerCase();
+            return addDays(now, word === 'tomorrow' ? 1 : 0);
+        }
+
+        return null;
+    }
+
+    function describeAround(text, code, index, matchLen) {
+        const start = Math.max(0, index - 70);
+        const end = Math.min(text.length, index + matchLen + 90);
+        const slice = text.slice(start, end);
+        return findDescription({ textContent: slice, getAttribute: () => '' }, code);
+    }
+
+    /** Scans "code: X" contexts in `text`. Returns how many were added. */
+    function scanCouponContext(text, el, source, now, found, confidence, fixedDescription, strict = true) {
+        if (!text) return 0;
+        CONTEXT_RE.lastIndex = 0;
+        let m, n = 0;
+        while ((m = CONTEXT_RE.exec(text)) !== null) {
+            const keyword = m[1].toLowerCase();
+            const code = normalizeCoupon(m[3]).toUpperCase();
+            if (!/\d/.test(code) && CONTEXT_NOISE.has(code)) continue;
+            const requireDigit = strict || !/\s/.test(keyword);
+            if (!isPlausibleCoupon(code, { strict: requireDigit })) continue;
+            const ctx = fixedDescription != null
+                ? fixedDescription
+                : describeAround(text, code, m.index, m[0].length);
+            if (addCoupon(found, code, el, source, now, confidence, ctx)) n++;
+        }
+        return n;
+    }
+
+    /**
+     * Three-tier extraction:
+     *   Tier A — data attributes, coupon inputs, and elements whose class/id
+     *            clearly marks them as coupon fields (high/medium confidence).
+     *   Tier B — meta descriptions and the page title (low confidence).
+     *   Tier C — page body text, but ONLY when the digit requirement is met
+     *            (low confidence).
      * Nothing else is accepted.
      */
     function extractCouponsFromDom(root, source) {
         const found = new Map();
         const now = Date.now();
-        const isDoc = !!root.body;
-        const doc = isDoc ? root : (root.ownerDocument || document);
+        const doc = root && root.body ? root : (root && root.ownerDocument ? root.ownerDocument : document);
 
-        // ── Tier A: dedicated coupon elements ────────────────────
+        // ── Tier A1: data attributes (most reliable) ─────────────
+        if (doc.querySelectorAll) {
+            for (const attr of COUPON_ATTRS) {
+                doc.querySelectorAll(`[${attr}]`).forEach(el => {
+                    const val = el.getAttribute(attr);
+                    if (val && !/^https?:/i.test(val))
+                        addCoupon(found, val, el, source, now, 'high');
+                });
+            }
+        }
+
+        // ── Tier A2: dedicated coupon elements ───────────────────
         const couponNodes = doc.querySelectorAll ? doc.querySelectorAll(COUPON_SELECTORS) : [];
-        couponNodes.forEach(el => {
-            const text = (el.textContent || '').trim();
-            if (!text || text.length > 400) return;
+        [...couponNodes].reverse().forEach(el => {
+            const text = elementText(el);
+            if (text.length > 500) return;
 
             const cls = ((el.className || '') + ' ' + (el.id || '')).toLowerCase();
 
-            // A1. Direct code field: <span class="coupon-code">SAVE10</span>
-            //     Only the FIRST token is considered — no paragraph leaks.
+            // Input/textarea values inside coupon widgets.
+            if (typeof el.value === 'string' && el.value.trim() &&
+                /^(?:INPUT|TEXTAREA)$/.test(el.tagName || '')) {
+                addCoupon(found, el.value, el, source, now, 'high');
+            }
+
+            if (!text) return;
+
+            // A dedicated code field: <span class="coupon-code">SAVE10</span>.
+            // Only the FIRST token is considered — no paragraph leaks.
             const looksLikeCodeField =
                 /(?:^|[\s_-])(?:code|coupon[-_]?code|voucher[-_]?code|promo[-_]?code)(?:$|[\s_-])/.test(cls);
 
             if (looksLikeCodeField) {
                 const candidate = text.split(/\s+/)[0];
-                if (isPlausibleCoupon(candidate, { strict: false })) {
-                    addCoupon(found, candidate, el, source, now);
-                }
+                addCoupon(found, candidate, el, source, now, 'high');
             }
 
-            // A2. Contextual patterns inside the element: "code XXXX"
-            CONTEXT_RE.lastIndex = 0;
-            let m;
-            while ((m = CONTEXT_RE.exec(text)) !== null) {
-                if (isPlausibleCoupon(m[1], { strict: false })) {
-                    addCoupon(found, m[1], el, source, now);
-                }
+            // Contextual patterns inside the element: "code XXXX".
+            scanCouponContext(text, el, source, now, found,
+                looksLikeCodeField ? 'high' : 'medium', null, false);
+
+            // A code first seen in a code field often has its description and
+            // expiry in a sibling element. Enrich any known code in this card.
+            const upperText = text.toUpperCase();
+            for (const known of [...found.keys()]) {
+                if (upperText.includes(known))
+                    addCoupon(found, known, el, source, now, 'low');
+            }
+
+            // Copy-card heuristic: a card with a Copy/Redeem affordance and
+            // exactly one code-shaped token.
+            const copyish = /\b(?:copy|tap to copy|redeem|apply)\b/i.test(text) ||
+                !!(el.querySelector && el.querySelector('button, [class*="copy"], [class*="redeem"]'));
+            if (copyish) {
+                const tokens = [...new Set(text.split(/\s+/)
+                    .map(w => normalizeCoupon(w).toUpperCase())
+                    .filter(w => isPlausibleCoupon(w, { strict: false })))];
+                if (tokens.length === 1) addCoupon(found, tokens[0], el, source, now, 'medium');
+            }
+
+            // Coupon-card first-token tier: a short card whose only
+            // code-shaped token carries a digit.
+            if (!looksLikeCodeField && text.length <= 160) {
+                const tokens = text.split(/\s+/)
+                    .map(w => normalizeCoupon(w).toUpperCase())
+                    .filter(w => isPlausibleCoupon(w, { strict: false }));
+                const withDigit = tokens.find(w => /\d/.test(w));
+                if (withDigit) addCoupon(found, withDigit, el, source, now, 'medium');
             }
         });
 
-        // ── Tier B: body text — strict, digit required ───────────
+        // ── Tier B: meta descriptions and title ──────────────────
+        const metaTexts = [];
+        for (const sel of [
+            'meta[name="description"]',
+            'meta[property="og:description"]',
+            'meta[name="twitter:description"]',
+        ]) {
+            const v = doc.querySelector && doc.querySelector(sel)?.getAttribute('content');
+            if (v) metaTexts.push(v);
+        }
+        if (doc.title) metaTexts.push(doc.title);
+        for (const text of metaTexts)
+            scanCouponContext(text, null, source, now, found, 'low', null, false);
+
+        // ── Tier C: body text — strict, digit required ───────────
         const bodyText = (doc.body || doc.documentElement)?.innerText || '';
         if (bodyText) {
             CONTEXT_RE.lastIndex = 0;
             let m;
             while ((m = CONTEXT_RE.exec(bodyText)) !== null) {
-                if (isPlausibleCoupon(m[1], { strict: true })) {
-                    addCoupon(found, m[1], null, source, now);
-                }
+                const code = normalizeCoupon(m[3]).toUpperCase();
+                if (!isPlausibleCoupon(code, { strict: true })) continue;
+                addCoupon(found, code, null, source, now, 'low',
+                    describeAround(bodyText, code, m.index, m[0].length));
             }
         }
 
@@ -1615,23 +1897,34 @@
 
     function mergeCoupons(newOnes) {
         const store = loadCoupons();
-        const byCode = new Map(store.map(c => [c.code, c]));
+        const byCode = new Map(store.map(c => [String(c.code || '').toUpperCase(), c]));
         let added = 0, updated = 0;
         for (const nc of newOnes) {
-            if (!isPlausibleCoupon(nc.code, { strict: false })) continue;
-            if (byCode.has(nc.code)) {
-                const ex = byCode.get(nc.code);
+            const code = normalizeCoupon(nc.code).toUpperCase();
+            if (!isPlausibleCoupon(code, { strict: false })) continue;
+            nc.code = code;
+            if (byCode.has(code)) {
+                const ex = byCode.get(code);
                 ex.lastSeen = Math.max(ex.lastSeen || 0, nc.lastSeen || 0);
-                ex.firstSeen = ex.firstSeen || nc.firstSeen;
+                ex.firstSeen = Math.min(ex.firstSeen || nc.firstSeen || 0, nc.firstSeen || ex.firstSeen || 0) ||
+                    ex.firstSeen;
                 if ((nc.description || '').length > (ex.description || '').length)
                     ex.description = nc.description;
-                // Expiry can only be extended, never shrunk
+                // Expiry can only be extended, never shrunk.
                 if (nc.expiry && (!ex.expiry || nc.expiry > ex.expiry))
                     ex.expiry = nc.expiry;
-                ex.hits = (ex.hits || 1) + 1;
+                if (!ex.expiry && ex.description) {
+                    const parsed = parseExpiry(ex.description);
+                    if (parsed) ex.expiry = parsed;
+                }
+                // Keep the strongest provenance seen.
+                if ((CONFIDENCE_RANK[nc.confidence] || 0) > (CONFIDENCE_RANK[ex.confidence] || 0))
+                    ex.confidence = nc.confidence;
+                if (!ex.source && nc.source) ex.source = nc.source;
+                ex.hits = (ex.hits || 1) + Math.max(1, nc.hits || 1);
                 updated++;
             } else {
-                byCode.set(nc.code, nc);
+                byCode.set(code, nc);
                 added++;
             }
         }
@@ -1650,26 +1943,102 @@
         });
     }
 
+    /**
+     * Fetches one coupon page without rejecting, so the caller can tell a
+     * transport failure, an HTTP error, a bot challenge, and a legitimately
+     * empty page apart.
+     */
+    function fetchCouponPage(url) {
+        return new Promise(resolve => {
+            GM_xmlhttpRequest({
+                method: 'GET', url, timeout: 15000,
+                headers: {
+                    'User-Agent': navigator.userAgent,
+                    'Accept-Language': 'en-GH,en;q=0.9',
+                },
+                onload: r => resolve({
+                    ok: r.status >= 200 && r.status < 300,
+                    status: r.status,
+                    text: r.responseText || '',
+                    finalUrl: r.finalUrl || url,
+                }),
+                onerror: e => resolve({
+                    ok: false, status: 0, text: '',
+                    error: (e && e.message) || 'network error',
+                }),
+                ontimeout: () => resolve({ ok: false, status: 0, text: '', error: 'timeout' }),
+            });
+        });
+    }
+
+    // Pages that returned a bot wall instead of content.
+    const CHALLENGE_RE = /(?:captcha|unusual traffic|verify (?:that )?you(?:'re| are) (?:a )?human|are you a robot|access denied|security check|request blocked|enable (?:javascript|js) and cookies|too many requests)/i;
+
+    function isChallengePage(text) {
+        const t = String(text || '');
+        if (t.length < 200) return true;   // empty body or a bare redirect shell
+        return CHALLENGE_RE.test(t.slice(0, 8000));
+    }
+
+    /**
+     * Syncs the coupon store from the site's coupon pages.
+     *
+     * Robustness rules:
+     *  - a failed URL does not stop the loop; the next candidate is tried;
+     *  - bot walls / empty shells count as failures, not empty stores;
+     *  - the sync timestamp only advances when at least one page was fetched
+     *    successfully, so an outage never parks the finder for six hours;
+     *  - `force` bypasses the TTL for the panel's Find Coupons button.
+     */
     async function refreshCouponsFromWeb(force = false) {
         const last = GM_getValue(CONFIG.couponLastSyncKey, 0);
-        if (!force && Date.now() - last < CONFIG.couponCacheTTLMs)
-            return { added: 0, updated: 0, cached: true };
+        const retryAt = GM_getValue(CONFIG.couponRetryKey, 0);
+        if (!force && last && Date.now() - last < CONFIG.couponCacheTTLMs)
+            return { added: 0, updated: 0, cached: true, scanned: 0, okPages: 0, empty: false, failed: false };
+        if (!force && retryAt && Date.now() < retryAt)
+            return { added: 0, updated: 0, cached: true, scanned: 0, okPages: 0, empty: false, failed: true, retryAt };
 
-        let added = 0, updated = 0;
+        let added = 0, updated = 0, scanned = 0, okPages = 0, empty = false;
+        const errors = [];
+
         for (const url of CONFIG.couponPageUrls) {
-            try {
-                const html = await fetchHtml(url);
-                const doc = new DOMParser().parseFromString(html, 'text/html');
-                const list = extractCouponsFromDom(doc, url);
-                if (list.length) {
-                    const r = mergeCoupons(list);
-                    added += r.added; updated += r.updated;
-                    break;
-                }
-            } catch (e) { warn('Coupon fetch failed:', url, e.message); }
+            const page = await fetchCouponPage(url);
+            scanned++;
+            if (!page.ok) {
+                errors.push(`${url}: HTTP ${page.status || page.error || 'error'}`);
+                continue;
+            }
+            if (isChallengePage(page.text)) {
+                errors.push(`${url}: blocked or empty`);
+                warn('Coupon page blocked or empty:', url);
+                continue;
+            }
+
+            okPages++;
+            const doc = new DOMParser().parseFromString(page.text, 'text/html');
+            const list = extractCouponsFromDom(doc, page.finalUrl || url);
+            if (!list.length) {
+                empty = true;
+                errors.push(`${url}: no codes found`);
+                continue;
+            }
+            const r = mergeCoupons(list);
+            added += r.added; updated += r.updated;
+            break;
         }
-        GM_setValue(CONFIG.couponLastSyncKey, Date.now());
-        return { added, updated, cached: false };
+
+        const failed = okPages === 0;
+        if (!failed) {
+            GM_setValue(CONFIG.couponLastSyncKey, Date.now());
+            GM_setValue(CONFIG.couponRetryKey, 0);
+        } else {
+            // Keep the previous successful timestamp, but back off briefly so
+            // every navigation does not immediately retry a blocked host.
+            GM_setValue(CONFIG.couponRetryKey, Date.now() + CONFIG.couponRetryMs);
+            warn('Coupon sync failed; keeping the previous sync time.', errors.join('; '));
+        }
+
+        return { added, updated, cached: false, scanned, okPages, empty, failed };
     }
 
     function scanCurrentPageForCoupons() {
@@ -1678,26 +2047,135 @@
         return { added: 0, updated: 0 };
     }
 
+    /** Money label without trailing ".00" so deal badges stay compact. */
+    function formatDealMoney(n, currency) {
+        if (n == null) return '';
+        const s = formatMoney(n, currency);
+        return s.replace(/\.00$/, '');
+    }
+
+    /**
+     * Reads the deal value out of a description or the code itself.
+     * Returns `{ kind, value, currency, minSpend }` or null.
+     */
+    function parseCouponValue(c) {
+        const text = `${(c && c.description) || ''} ${(c && c.code) || ''}`.replace(/\s+/g, ' ');
+        const out = { kind: null, value: null, currency: null, minSpend: null };
+        let m;
+
+        // Percentage: "10% off", "15 % discount".
+        m = text.match(/(\d{1,2}(?:[.,]\d+)?)\s*%\s*(?:off|discount|extra)?/i);
+        if (m) {
+            const v = parseFloat(m[1].replace(',', '.'));
+            if (v > 0 && v <= 90) { out.kind = 'percent'; out.value = v; }
+        }
+
+        // Fixed amount: "GH₵50 off", "$5", "€10".
+        if (!out.kind) {
+            m = text.match(/(?:GH₵|GH¢|GHS|US\$|\$|€|£)\s*(\d{1,5}(?:[.,]\d{1,2})?)/i);
+            if (m) {
+                out.kind = 'amount';
+                out.value = parseFloat(m[1].replace(',', '.'));
+                out.currency = detectCurrency(text, SITE.currency);
+            }
+        }
+
+        // Free delivery.
+        if (!out.kind && /free\s*(?:shipping|delivery)/i.test(text))
+            out.kind = 'shipping';
+
+        // Minimum spend (soft signal, used for ranking and the description).
+        m = text.match(/(?:min(?:imum)?\s*(?:spend|purchase|order)?|spend(?: of)?)\s*(?:GH₵|GH¢|GHS|US\$|\$|€|£)?\s*(\d{1,5}(?:[.,]\d{1,2})?)/i);
+        if (m) {
+            const min = parseFloat(m[1].replace(',', '.'));
+            if (min > 0) out.minSpend = min;
+        }
+
+        return out.kind || out.minSpend != null ? out : null;
+    }
+
+    /** Short badge text for a coupon's deal value. */
+    function couponDealLabel(c) {
+        const v = parseCouponValue(c);
+        if (!v) return '';
+        if (v.kind === 'percent') return `${v.value}% off`;
+        if (v.kind === 'amount') return `${formatDealMoney(v.value, v.currency || c.currency || SITE.currency)} off`;
+        if (v.kind === 'shipping') return 'Free shipping';
+        if (v.minSpend != null) return `Min ${formatDealMoney(v.minSpend, c.currency || SITE.currency)}`;
+        return '';
+    }
+
+    // Words too generic to imply that a coupon applies to a product.
+    const COUPON_STOP_WORDS = new Set([
+        'with','for','and','the','from','this','that','your','you','all','any','new',
+        'get','use','off','code','free','shipping','delivery','price','product','item',
+        'buy','now','more','save','discount','coupon','voucher','promo','only','valid',
+        'until','expires','expiry','days','today','tomorrow','extra','min','spend','order',
+        'store','site','wide','when','over','above','below','than','plus','also','can',
+    ]);
+
+    function couponTokens(name) {
+        return [...new Set(String(name || '').toLowerCase()
+            .replace(/[^a-z0-9]+/g, ' ')
+            .split(' ')
+            .filter(w => w.length > 2 && !COUPON_STOP_WORDS.has(w)))];
+    }
+
+    /**
+     * Ranks stored coupons for the current product. Whole-word relevance and
+     * generic/site-wide codes rank highest; expired codes sink to the bottom;
+     * freshness, confidence, repeats, and deal size break ties.
+     */
     function rankCoupons(productName) {
         const all = loadCoupons();
-        const tokens = (productName || '').toLowerCase().split(/\s+/).filter(w => w.length > 3);
+        const tokens = couponTokens(productName);
+        const now = Date.now();
+
         const scored = all.map(c => {
             let s = 0;
-            const desc = (c.description || '').toLowerCase();
-            const ageH = (Date.now() - (c.lastSeen || 0)) / 3.6e6;
-            s += Math.max(0, 30 - ageH / 24);
-            if (c.expiry) {
-                const dLeft = (c.expiry - Date.now()) / 8.64e7;
-                if (dLeft > 0) s += Math.min(20, dLeft / 2);
-                else s -= 30;
+            const code = String(c.code || '').toUpperCase();
+            const desc = `${c.description || ''} ${code}`.toLowerCase();
+            const words = new Set(desc.replace(/[^a-z0-9]+/g, ' ').split(' ').filter(Boolean));
+
+            // Product relevance.
+            for (const t of tokens) {
+                if (words.has(t)) s += 18;
+                else if (t.length > 4 && desc.includes(t)) s += 6;
             }
-            for (const t of tokens) if (desc.includes(t)) s += 15;
-            if (/all|any|site.?wide|everything|store/i.test(desc)) s += 10;
-            if (/free\s*ship/i.test(desc)) s += 5;
-            s += Math.min(5, (c.hits || 1));
+            if (/(?:all|any|everything|site[- ]?wide|store[- ]?wide|first order|new (?:user|customer))/i.test(desc))
+                s += 12;
+
+            // Freshness: 24 points at lastSeen, half-life ~10 days.
+            const ageD = Math.max(0, (now - (c.lastSeen || 0)) / 8.64e7);
+            s += 24 / (1 + ageD / 10);
+
+            // Source confidence and repeats.
+            s += CONFIDENCE_RANK[c.confidence] || CONFIDENCE_RANK.medium;
+            s += 2 * Math.min(6, Math.max(1, c.hits || 1));
+
+            // Expiry: an expired code is effectively unusable.
+            if (c.expiry) {
+                const dLeft = (c.expiry - now) / 8.64e7;
+                if (dLeft < 0) s -= 100;
+                else if (dLeft <= 3) s += 10;
+                else s += 6;
+            }
+
+            // Bigger, simpler deals first; large minimum spends are a drawback.
+            const v = parseCouponValue(c);
+            if (v) {
+                if (v.kind === 'percent') s += Math.min(20, v.value * 0.8);
+                else if (v.kind === 'amount') s += Math.min(14, (v.value || 0) / 10);
+                else if (v.kind === 'shipping') s += 6;
+                if (v.minSpend != null) s -= Math.min(8, v.minSpend / 100);
+            }
+
+            if ((c.description || '').length >= 8) s += 2;
+
             return { c, s };
         });
-        scored.sort((a, b) => b.s - a.s);
+
+        scored.sort((a, b) => b.s - a.s || String(a.c.code).localeCompare(String(b.c.code)));
         return scored.map(x => x.c);
     }
 
@@ -1839,6 +2317,12 @@
             }
             #${CONFIG.uiPanelId} .jpt-coupon-code:hover { background: #ffeedd; }
             #${CONFIG.uiPanelId} .jpt-coupon-expiry { font-size: 10px; color: #a05a1a; margin-left: auto; }
+            #${CONFIG.uiPanelId} .jpt-coupon-deal {
+                font-size: 10px; font-weight: 700; color: #1a7a3c;
+                background: #e9f7ee; border: 1px solid #bfe3cb; border-radius: 3px;
+                padding: 0 4px; white-space: nowrap;
+            }
+            #${CONFIG.uiPanelId} .jpt-coupon.jpt-tentative { border-style: dotted; opacity: .85; }
             #${CONFIG.uiPanelId} .jpt-coupon-desc { font-size: 11px; color: #666; line-height: 1.3; }
             #${CONFIG.uiPanelId} .jpt-no-coupons { color: #999; font-size: 12px; padding: 6px 0; text-align: center; }
             #${CONFIG.uiPanelId} .jpt-toast {
@@ -1968,9 +2452,15 @@
             const web = await refreshCouponsFromWeb(true);
             renderCoupons();
             b.textContent = 'Find Coupons'; b.disabled = false;
-            toast.textContent = `+${(local.added||0) + (web.added||0)} new, ${(local.updated||0) + (web.updated||0)} updated`;
+            const added = (local.added || 0) + (web.added || 0);
+            const updated = (local.updated || 0) + (web.updated || 0);
+            let msg;
+            if (web.failed) msg = `Coupon pages unavailable — kept cached codes (+${added} local)`;
+            else if (web.empty && !added) msg = 'No codes found on the coupon pages';
+            else msg = `+${added} new, ${updated} updated`;
+            toast.textContent = msg;
             toast.classList.add('show');
-            setTimeout(() => toast.classList.remove('show'), 2000);
+            setTimeout(() => toast.classList.remove('show'), 2200);
         });
         panel.querySelector('.jpt-clear').addEventListener('click', () => {
             if (!confirm('Clear price history and cached coupons for this site?')) return;
@@ -1978,6 +2468,7 @@
             const h = loadHistory(); delete h[k]; saveHistory(h);
             GM_setValue(CONFIG.couponStorageKey, '[]');
             GM_setValue(CONFIG.couponLastSyncKey, 0);
+            GM_setValue(CONFIG.couponRetryKey, 0);
             updatePanel(null); updateTrackedBadge(); renderCoupons();
         });
         panel.querySelector('.jpt-tracked-btn').addEventListener('click', openTrackedModal);
@@ -2062,9 +2553,13 @@
         const productName = document.querySelector('h1.name, h1[data-pl="product-title"], h1')?.textContent.trim() || '';
         const ranked = rankCoupons(productName);
         const total = ranked.length;
+        const now = Date.now();
+        const usable = ranked.filter(c => !(c.expiry && c.expiry < now)).length;
 
         const lastSync = GM_getValue(CONFIG.couponLastSyncKey, 0);
-        statusEl.textContent = `${total} stored · synced ${timeAgo(lastSync)}`;
+        statusEl.textContent = total
+            ? `${usable} usable · ${total} stored · synced ${lastSync ? timeAgo(lastSync) : 'never'}`
+            : `No codes stored · synced ${lastSync ? timeAgo(lastSync) : 'never'}`;
 
         let view = ranked;
         if (!showAll) view = ranked.slice(0, 10);
@@ -2079,17 +2574,25 @@
             return;
         }
 
-        const now = Date.now();
         list.innerHTML = view.map(c => {
-            const expired = c.expiry && c.expiry < now;
+            const expired = !!(c.expiry && c.expiry < now);
             const exp = c.expiry
                 ? new Date(c.expiry).toLocaleDateString('en-GH', { day: '2-digit', month: 'short' })
                 : '';
+            const deal = couponDealLabel(c);
+            const confidence = c.confidence || 'medium';
+            const title = ['Click to copy',
+                confidence === 'high' ? 'confirmed code field' : '',
+                confidence === 'low' ? 'tentative match' : '',
+                c.source ? `found on ${c.source}` : '',
+            ].filter(Boolean).join(' · ');
+            const expTitle = c.expiry ? `Expires ${formatDateTime(c.expiry)}` : '';
             return `
-                <div class="jpt-coupon ${expired ? 'jpt-expired' : ''}">
+                <div class="jpt-coupon ${expired ? 'jpt-expired' : ''} ${confidence === 'low' ? 'jpt-tentative' : ''}">
                     <div class="jpt-coupon-row1">
-                        <span class="jpt-coupon-code" data-code="${escapeHtml(c.code)}" title="Click to copy">${escapeHtml(c.code)}</span>
-                        ${exp ? `<span class="jpt-coupon-expiry">${expired ? 'expired ' : 'exp '}${escapeHtml(exp)}</span>` : ''}
+                        <span class="jpt-coupon-code" data-code="${escapeHtml(c.code)}" title="${escapeHtml(title)}">${escapeHtml(c.code)}</span>
+                        ${deal ? `<span class="jpt-coupon-deal">${escapeHtml(deal)}</span>` : ''}
+                        ${exp ? `<span class="jpt-coupon-expiry" title="${escapeHtml(expTitle)}">${expired ? 'expired ' : 'exp '}${escapeHtml(exp)}</span>` : ''}
                     </div>
                     ${c.description ? `<div class="jpt-coupon-desc">${escapeHtml(c.description)}</div>` : ''}
                 </div>`;

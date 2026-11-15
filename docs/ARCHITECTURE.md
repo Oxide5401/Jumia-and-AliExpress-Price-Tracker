@@ -53,7 +53,7 @@ The file is divided into nine commented sections, plus the smart-watch module in
 | 3 | Price + image extraction | `cleanUrl`, `absoluteImage`, `productNodesOf`, `imageFromDoc`, `extractImage`, `extractFromJsonLd`, `extractFromDomJumia`, `extractFromDomAliExpress`, `extractFromAliExpressState`, `extractFromMeta`, `extractPrice` |
 | 4 | Price storage | `loadHistory`, `saveHistory`, `mergeHistoryData`, `recordPrice` |
 | **4b** | **Smart watch scheduler** | `loadWatchState`, `selectCanaries`, `watchNextDelay`, `noteLivePrice`, `smartWatchTick`, `checkWatchedProduct`, `applyWatchedPrice`, `initSmartWatch`, `renderWatchStatus` |
-| 5 | Coupons | validation sets, `extractCouponsFromDom`, `mergeCoupons`, `loadCoupons`, `saveCoupons`, `purgeInvalidCoupons`, `fetchHtml`, `refreshCouponsFromWeb`, `scanCurrentPageForCoupons`, `rankCoupons` |
+| 5 | Coupons | validation sets, `normalizeCoupon`, `extractCouponsFromDom`, `mergeCoupons`, `loadCoupons`, `saveCoupons`, `purgeInvalidCoupons`, `fetchCouponPage`, `refreshCouponsFromWeb`, `scanCurrentPageForCoupons`, `parseExpiry`, `parseCouponValue`, `rankCoupons` |
 | 6 | Main panel | `createPanel`, `updateTrackedBadge`, `updatePanel`, `renderCoupons` |
 | 7 | Tracked-products dashboard | `backfillImages`, `editTarget`, `openTrackedModal`, `refreshDashboardIfOpen`, `renderTrackedModal(preserve)` |
 | 8 | Notifications | `notify`, `notifyDrop` |
@@ -275,17 +275,21 @@ Limits enforced in `smartWatchTick`:
 
 ## 8. Coupons
 
-Extraction is deliberately conservative:
+Extraction is deliberately conservative but multi-source:
 
-1. Collect candidate code/context pairs from DOM text, `data-*` attributes, and nearby elements.
-2. Reject candidates by length/charset and an exact-noise dictionary (`CODE`, `OFF`, `SAVE`, …).
-3. Deduplicate by normalised code.
-4. Merge into the per-site store with hit counts and first/last-seen timestamps.
-5. Rank with `rankCoupons(productName)`: recency, expiry proximity, product-token matches, site-wide wording, free shipping, hits.
+1. **High confidence** — `data-code` / `data-coupon-code` / clipboard attributes, coupon `<input>`/`<textarea>` values, and elements whose class/id marks them as a code field.
+2. **Medium confidence** — short coupon cards, including copy-to-redeem cards (exactly one code-shaped token), and explicit “code: X” phrasing inside a coupon element.
+3. **Low confidence** — meta descriptions, the page title, and page-body sentences. These must contain a digit.
+
+`normalizeCoupon` applies NFKC, strips zero-width characters and quote/bracket wrappers. `isPlausibleCoupon` enforces length (4–20), charset, a letter, and the noise layers: exact words (`CODE`, `SAVE`, …), long UI substrings, repeated patterns (`HELPHELP`), and code-shaped noise (prices `GHS50`, specs `128GB`, years `2024`, numeric IDs). `CONTEXT_RE` captures the keyword separately so bare “coupon” requires a digit and cannot capture an adjective from “coupon available…”. `elementText` inserts spaces at child-element boundaries to avoid concatenated fake codes.
+
+Expiry parsing is display-only (`parseExpiry`): ISO date/datetime, day-month-year, month-day-year, day/month/year, day-month without a year (rolls forward), relative day/week/month windows, and today/tomorrow. Invalid dates return `null`.
+
+`mergeCoupons` deduplicates by normalised code and keeps the strongest confidence, longest description, latest expiry, earliest first-seen, and a hit count. `rankCoupons(productName)` scores product-token matches (whole-word preferred), site-wide wording, freshness (roughly a 10-day half-life), confidence, hits, expiry proximity (`-100` for expired), and deal value/minimum spend. `parseCouponValue`/`couponDealLabel` read `%`, currency amounts, free shipping, and minimum spend from the description or code.
 
 Per-site storage keys live in `CONFIG`, derived from `IS_ALI`. `purgeInvalidCoupons()` removes entries that older versions may have stored incorrectly.
 
-Web sync honours `CONFIG.couponCacheTTLMs` (6 hours) unless forced by **Find Coupons**. `fetchHtml` uses `GM_xmlhttpRequest` with a 15 s timeout and the browser's user agent.
+Web sync honours `CONFIG.couponCacheTTLMs` (6 hours) unless forced by **Find Coupons**. `fetchCouponPage` resolves transport failures, non-2xx responses, and bot challenges instead of throwing; `isChallengePage` flags captcha/empty shells. The loop tries every configured URL until one yields codes, and only advances `couponLastSyncKey` when at least one page loaded successfully — a total outage leaves the old timestamp intact so the next visit retries. A failed sync writes `couponRetryKey` (`*_coupons_retry_after`), a ten-minute backoff that suppresses automatic retries without delaying an explicit **Find Coupons** click.
 
 ---
 

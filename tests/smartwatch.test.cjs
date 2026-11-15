@@ -59,6 +59,16 @@ async function makeEnv({ url = 'https://www.jumia.com.gh/', storage = {}, respon
     };
     win.setInterval = () => 0;
 
+    // jsdom does not implement innerText; coupon extraction uses it for the
+    // page-body tier, so map it to textContent.
+    try {
+        Object.defineProperty(win.HTMLElement.prototype, 'innerText', {
+            get() { return this.textContent; },
+            set(v) { this.textContent = v; },
+            configurable: true,
+        });
+    } catch { /* keep the native implementation */ }
+
     win.GM_xmlhttpRequest = opts => {
         requests.push(opts);
         const resp = typeof responses === 'function' ? responses(opts.url, opts) : responses[opts.url];
@@ -103,6 +113,15 @@ function productReqs(env) {
 
 function loadJSON(env, key) {
     return JSON.parse(env.store.get(key) || '{}');
+}
+
+function loadCoupons(env) {
+    try { return JSON.parse(env.store.get('jumia_gh_coupons') || '[]'); }
+    catch { return []; }
+}
+
+function couponMap(env) {
+    return Object.fromEntries(loadCoupons(env).map(c => [c.code, c]));
 }
 
 function seedHistory(products) {
@@ -716,6 +735,175 @@ test('a renamed listing on a visit shows a panel warning, not a drop', async () 
     assert(/0\.0%/.test(stats), 'change restarts after the swap');
     assert(!/Drop:/.test(stats), 'no fake -99% drop line');
     assert.strictEqual(env.win.__notifications.length, 0, 'no misleading notification');
+});
+
+// ── 15. Coupon extraction: attributes, fields, tiers, noise, badges ───
+test('coupon extraction accepts real codes, rejects noise, and keeps expiry', async () => {
+    const html = `<!doctype html><html><head>
+        <meta name="description" content="Save with coupon code META9 today">
+        <title>Coupons</title></head><body>
+        <h1 class="name">Samsung Galaxy A15 Phone</h1>
+        <div class="coupon-card"><span class="coupon-code">SAVE15</span><span>15% off Samsung Galaxy phones</span></div>
+        <button data-code="JUMIA20">Copy code</button>
+        <input class="voucher-code" value="WELCOME5">
+        <div class="coupon-card"><span class="coupon-code">DEC31</span><span>Valid until 31 Dec 2099</span></div>
+        <div class="coupon-card"><span class="coupon-code">OLD20</span><span>20% off, expired 2020-01-01</span></div>
+        <div class="coupon-card"><span class="coupon-code">2024</span></div>
+        <div class="coupon-card"><span class="coupon-code">GHS50</span></div>
+        <div class="coupon-card"><span class="coupon-code">HELPHELP</span></div>
+        <div class="coupon-card"><span class="coupon-code">128GB</span></div>
+        <div class="coupon-card">This coupon available for all shoppers</div>
+        <div class="coupon-card">Promo code <b>FREESHIP</b></div>
+        <button data-code="CAPTCHA">Copy</button>
+        <p>Use coupon code EXTRA7 for 7% off.</p>
+        </body></html>`;
+    const env = await makeEnv({
+        storage: { jumia_gh_coupons_last_fetch: realNow },
+        html,
+    });
+
+    const by = couponMap(env);
+    for (const code of ['SAVE15', 'JUMIA20', 'WELCOME5', 'DEC31', 'OLD20', 'EXTRA7', 'META9', 'FREESHIP'])
+        assert(by[code], code + ' extracted');
+    for (const bad of ['2024', 'GHS50', 'HELPHELP', '128GB', 'CAPTCHA', 'AVAILABLE'])
+        assert(!by[bad], bad + ' rejected as noise');
+
+    assert.strictEqual(by.JUMIA20.confidence, 'high', 'data attribute is high confidence');
+    assert.strictEqual(by.WELCOME5.confidence, 'high', 'coupon input value is high confidence');
+    assert.strictEqual(by.SAVE15.confidence, 'high', 'dedicated code field is high confidence');
+    assert.strictEqual(by.EXTRA7.confidence, 'low', 'body sentence is low confidence');
+    assert.strictEqual(by.META9.confidence, 'low', 'meta description is low confidence');
+    assert.strictEqual(by.FREESHIP.confidence, 'medium', 'multiword "Promo code" allows a letter-only code');
+    assert(by.DEC31.expiry > realNow, 'future expiry parsed');
+    assert(by.OLD20.expiry < realNow, 'past expiry parsed');
+
+    const doc = env.win.document;
+    const rendered = [...doc.querySelectorAll('.jpt-coupon-code')].map(e => e.dataset.code);
+    assert.strictEqual(rendered[0], 'SAVE15', 'most relevant usable coupon first');
+    assert(rendered.includes('OLD20'), 'expired coupon still listed (greyed out)');
+
+    const cardFor = code => [...doc.querySelectorAll('.jpt-coupon')]
+        .find(c => c.querySelector(`[data-code="${code}"]`));
+    const old = cardFor('OLD20');
+    assert(old.classList.contains('jpt-expired'), 'expired styling');
+    assert(/20% off/.test(old.querySelector('.jpt-coupon-deal').textContent), 'deal badge parsed');
+
+    const dec = cardFor('DEC31');
+    assert(/exp 31 Dec/.test(dec.querySelector('.jpt-coupon-expiry').textContent), 'expiry date rendered');
+    assert(/usable/.test(doc.querySelector('.jpt-coupons-status').textContent), 'usable count shown');
+});
+
+// ── 16. A failed sync must not park the finder for six hours ───────────
+test('all coupon pages failing keeps the previous sync timestamp', async () => {
+    const storage = { jumia_gh_coupons_last_fetch: realNow };
+    const env = await makeEnv({
+        storage,
+        responses: {
+            'https://www.jumia.com.gh/coupons/': { status: 403, text: 'Forbidden' },
+            'https://www.jumia.com.gh/sp/coupons/': {
+                status: 200,
+                text: '<!doctype html><html><head><title>Just a moment...</title></head><body>' +
+                    'Verify you are human. '.repeat(20) + '</body></html>',
+            },
+        },
+    });
+
+    env.win.document.querySelector('.jpt-find-coupons').click();
+    await flush(20);
+
+    assert.strictEqual(env.store.get('jumia_gh_coupons_last_fetch'), realNow,
+        'timestamp unchanged when every page fails');
+    const retryAt = env.store.get('jumia_gh_coupons_retry_after');
+    assert(retryAt > realNow, 'a short retry backoff is stored');
+    assert(/unavailable/i.test(env.win.document.querySelector('.jpt-toast').textContent),
+        'panel explains the outage');
+
+    // The backoff suppresses automatic retries during the next navigation.
+    const env2 = await makeEnv({
+        storage: {
+            jumia_gh_coupons_last_fetch: realNow,
+            jumia_gh_coupons_retry_after: realNow + 5 * 60 * 1000,
+        },
+    });
+    assert.strictEqual(env2.requests.filter(r => /coupons\//.test(r.url)).length, 0,
+        'automatic sync waits for the retry window');
+});
+
+// ── 17. A blocked first URL falls through to the next coupon page ──────
+test('coupon sync retries the next URL and records a success', async () => {
+    const couponPage = `<!doctype html><html><head><title>Coupons</title></head><body>
+        <div class="coupon-card"><span class="coupon-code">SECOND5</span><span>5% off your next order</span></div>
+        <p>${'Shop more and save with our latest offers. '.repeat(8)}</p>
+        </body></html>`;
+    const env = await makeEnv({
+        storage: { jumia_gh_coupons_last_fetch: realNow },
+        responses: {
+            'https://www.jumia.com.gh/coupons/': { status: 403, text: 'Forbidden' },
+            'https://www.jumia.com.gh/sp/coupons/': { status: 200, text: couponPage },
+        },
+    });
+
+    env.win.document.querySelector('.jpt-find-coupons').click();
+    await flush(20);
+
+    const by = couponMap(env);
+    assert.strictEqual(by.SECOND5.code, 'SECOND5', 'code from the second URL stored');
+    assert.strictEqual(by.SECOND5.confidence, 'high', 'dedicated field confidence kept');
+    assert.strictEqual(env.store.get('jumia_gh_coupons_last_fetch'), realNow,
+        'successful sync advances the timestamp');
+    assert(env.requests.filter(r => /coupons\//.test(r.url)).length >= 2, 'both URLs attempted');
+});
+
+// ── 18. Expiry parsing: ISO, day/month, relative, invalid ──────────────
+test('coupon expiry parsing handles ISO, day/month, relative and invalid dates', async () => {
+    const html = `<!doctype html><html><body>
+        <div class="coupon-card"><span class="coupon-code">ISO31</span><span>Expires 2099-12-31</span></div>
+        <div class="coupon-card"><span class="coupon-code">DMY31</span><span>Valid until 31/12/2099</span></div>
+        <div class="coupon-card"><span class="coupon-code">REL7</span><span>Valid for 7 days</span></div>
+        <div class="coupon-card"><span class="coupon-code">TOMM</span><span>Expires tomorrow</span></div>
+        <div class="coupon-card"><span class="coupon-code">BADDATE</span><span>Valid until 31/02/2099</span></div>
+        </body></html>`;
+    const env = await makeEnv({
+        storage: { jumia_gh_coupons_last_fetch: realNow },
+        html,
+    });
+    const by = couponMap(env);
+
+    const iso = new Date(by.ISO31.expiry);
+    assert.deepStrictEqual([iso.getFullYear(), iso.getMonth(), iso.getDate()], [2099, 11, 31],
+        'ISO expiry parsed');
+    const dmy = new Date(by.DMY31.expiry);
+    assert.deepStrictEqual([dmy.getFullYear(), dmy.getMonth(), dmy.getDate()], [2099, 11, 31],
+        'day/month/year expiry parsed');
+    assert(by.REL7.expiry > realNow + 6 * DAY && by.REL7.expiry < realNow + 8 * DAY,
+        'relative window parsed');
+    assert(by.TOMM.expiry > realNow && by.TOMM.expiry < realNow + 2 * DAY,
+        'tomorrow parsed');
+    assert.strictEqual(by.BADDATE.expiry, null, 'impossible date ignored');
+});
+
+// ── 19. Ranking prefers relevant usable codes; junk is purged ──────────
+test('ranking prefers relevant usable codes and purges junk on startup', async () => {
+    const coupons = [
+        { code: 'ALL10', description: '10% off everything', source: 'x', firstSeen: realNow, lastSeen: realNow, expiry: null, hits: 1, confidence: 'high' },
+        { code: 'PHONE15', description: '15% off Samsung Galaxy phone accessories', source: 'x', firstSeen: realNow - 5 * DAY, lastSeen: realNow - 20 * DAY, expiry: null, hits: 1, confidence: 'high' },
+        { code: 'OLD99', description: '99% off Samsung Galaxy phone', source: 'x', firstSeen: realNow, lastSeen: realNow, expiry: realNow - DAY, hits: 1, confidence: 'high' },
+        { code: '2024', description: 'year', source: 'x', firstSeen: realNow, lastSeen: realNow, expiry: null, hits: 1, confidence: 'high' },
+    ];
+    const env = await makeEnv({
+        storage: {
+            jumia_gh_coupons: JSON.stringify(coupons),
+            jumia_gh_coupons_last_fetch: realNow,
+        },
+        html: '<!doctype html><html><body><h1 class="name">Samsung Galaxy A15 Phone</h1></body></html>',
+    });
+
+    const rendered = [...env.win.document.querySelectorAll('.jpt-coupon-code')]
+        .map(e => e.dataset.code);
+    assert.strictEqual(rendered[0], 'PHONE15', 'product-relevant coupon first');
+    assert.strictEqual(rendered.at(-1), 'OLD99', 'expired coupon last');
+    assert(!rendered.includes('2024'), 'invalid stored code not rendered');
+    assert(!loadCoupons(env).some(c => c.code === '2024'), 'invalid stored code purged');
 });
 
 (async () => {

@@ -84,6 +84,7 @@ Notes:
 - `firstExtractDelayMs` is 800 ms on Jumia and 1200 ms on AliExpress; wait accordingly.
 - Image `<img>` elements do not load by default in jsdom; assert `src`/`alt` attributes, not pixels.
 - Stub `GM_xmlhttpRequest` per test to return canned HTML or an HTTP error.
+- jsdom does not implement `innerText`; define it on `HTMLElement.prototype` as a `textContent` getter when testing coupon body-text extraction.
 - For scheduler tests, capture `window.setTimeout` into a queue, replace `window.Date.now` with a controllable clock, and run queued callbacks manually. Enable the watch by setting `jumia_gh_smart_watch` to `true` and seeding `jumia_gh_smart_watch_state` (rather than relying on randomized seeding).
 - `switchToOffline`/hidden-tab behaviour can be tested by setting `document.visibilityState` via `Object.defineProperty` or by removing `pretendToBeVisual`.
 
@@ -106,6 +107,16 @@ These are the assertions worth keeping when changing extraction, storage, or UI.
 - AliExpress state extraction works when the DOM price class is missing.
 - Zero/negative/NaN prices are rejected.
 - `cleanName` strips zero-width characters; blank names do not overwrite stored names.
+
+### Coupons
+- `data-code`, coupon input values, and `class="coupon-code"` fields produce high-confidence codes.
+- Copy-to-redeem cards and “promo code X” sentences produce medium-confidence codes; meta/page sentences produce low-confidence codes.
+- Prices (`GHS50`), specs (`128GB`), years (`2024`), numeric IDs, exact UI words, repeated junk (`HELPHELP`), and “coupon available…” do not become codes.
+- Inline markup does not concatenate into fake codes; expiry and description come from sibling card text.
+- ISO, `30 Nov 2026`, `31/12/2026`, relative windows, and today/tomorrow parse; impossible dates return `null`.
+- Ranking puts a product-relevant usable code before a generic code and pushes an expired code last.
+- A blocked, timed-out, or challenge page followed by a working page still stores codes and advances the sync timestamp.
+- When every coupon page fails, the sync timestamp is unchanged and the panel reports the outage.
 
 ### Storage
 - `recordPrice` creates a product with `name`, `url`, `site`, `currency`, `image`, and one sample.
@@ -197,7 +208,8 @@ The UI must remain readable.
 - [ ] Close with × and with Escape. Reopen: position, size, maximized state, and snap preference are restored.
 - [ ] Drag the floating panel by its title bar; reload the page and confirm it reopens in the same spot. Double-click the title bar to snap it back to the bottom-right corner.
 - [ ] Change price via DevTools before Refresh: drop notification fires at ≥5%.
-- [ ] Coupons: **Find Coupons** populates the list; clicking a code copies it; **all** toggles.
+- [ ] Coupons: **Find Coupons** populates the list; each card shows a deal badge when parseable; clicking a code copies it; **all** toggles; expired codes are greyed out and last; the status line shows the usable count.
+- [ ] Simulate a failed coupon sync (DevTools → block `/coupons/`): the panel says the pages are unavailable and the stored sync time does not jump forward.
 - [ ] **Fetch images** fills thumbnails for products without images; a second click resumes.
 - [ ] Open dashboard → tick **Smart watch**: status shows `0/40 checks today · 3 canaries · next in …`.
 - [ ] Click **Check now**: one product request appears in DevTools, the status budget increments, and the row's current price reflects the result.

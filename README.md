@@ -2,7 +2,7 @@
 
 A single Tampermonkey/Violentmonkey userscript that tracks product prices on **Jumia Ghana** (`jumia.com.gh`) and **AliExpress** (Ghana shipping, GHS), finds and stores coupon codes, and shows everything in one dashboard — including **product thumbnails**.
 
-![Version](https://img.shields.io/badge/version-3.9.0-orange)
+![Version](https://img.shields.io/badge/version-3.10.0-orange)
 ![License](https://img.shields.io/badge/license-MIT-blue)
 ![Platform](https://img.shields.io/badge/platform-Tampermonkey%20%7C%20Violentmonkey-2ea44f)
 
@@ -78,12 +78,16 @@ A single Tampermonkey/Violentmonkey userscript that tracks product prices on **J
 - **Jumia only for background work.** AliExpress still captures on visit because it serves challenge pages to scripted fetches.
 - Shows its request budget and next check in the dashboard, so you can confirm it is behaving.
 
-### Coupons
+### Coupons (new in 3.10.0)
 - Scans the current page plus site coupon pages for codes.
-- Strict validation removes dictionary words, placeholders, and noise (`CODE`, `OFF`, `SAVE`, etc.), deduplicates, and scores relevance to the current product.
-- Persists codes across visits with per-code hit counts, first/last-seen timestamps, and expiry.
+- **Smarter extraction:** reads dedicated code fields, `data-code` / clipboard attributes, coupon input values, copy-to-redeem cards, meta descriptions, and “code: X” sentences. Each source carries a confidence tier (confirmed field → card → page text).
+- **Stricter noise filter:** rejects prices (`GHS50`), specs (`128GB`), years (`2024`), identifiers, dictionary words, repeated junk (`HELPHELP`), and sentence words after “coupon” (`coupon available…`).
+- **Confidence-aware ranking:** product-relevant and site-wide codes rank first; expired codes sink to the bottom; freshness, confidence, repeat sightings, and deal size break ties.
+- **Deal badges:** shows `15% off`, `GH₵ 50 off`, `Free shipping`, or the minimum spend next to each code.
+- **Resilient sync:** if a coupon page is blocked, times out, or serves a bot challenge, the next URL is tried. The six-hour sync clock only advances after a page actually loads, so an outage no longer hides new codes for hours.
+- Persists codes across visits with per-code hit counts, first/last-seen timestamps, expiry (ISO, `30 Nov 2026`, `31/12/2026`, “valid for 7 days”, today/tomorrow), and confidence.
 - 6-hour background sync; click a code to copy it.
-- Optional **all** toggle shows the full cached list instead of the top 10.
+- Optional **all** toggle shows the full cached list instead of the top 10, and the status line reports how many codes are still usable.
 
 ### Dashboard
 - One list for both sites, with a `Jumia` / `AliExpress` tag per row.
@@ -189,7 +193,11 @@ Coupons are found in two ways:
 1. **Page scan** — every page you visit is scanned for code-like patterns, with context labels such as `Code:`, `Coupon:`, `Voucher:`, `Use code`, etc. Full-width colons (`：`) are supported.
 2. **Coupon pages** — Jumia's `/coupons/` pages and AliExpress's `p/my-coupons` / `p/coupon-package` pages are fetched in the background when the cache is older than six hours.
 
-Codes must pass validation: minimum length, character set, and a noise dictionary. The list is deduplicated by code, and each code's description is scored against the current product name plus freshness, expiry, and site-wide relevance.
+Extraction reads, in descending confidence order: `data-code` / `data-clipboard-text` attributes, coupon input values, dedicated code fields (`class="coupon-code"`), short coupon cards (including copy-to-redeem cards), meta descriptions, and finally page sentences. Codes from page text must contain a digit; letter-only codes are only accepted from a real code field or an explicit “promo code X” phrase, and common words such as “available” are ignored.
+
+Codes must pass validation: length, character set, and noise rules. Prices (`GHS50`), specs (`128GB`), years (`2024`), numeric IDs, dictionary words (`SAVE`, `OFF`), and repeated junk (`HELPHELP`) are rejected. The list is deduplicated by code, and each code's description is scored against the current product name plus freshness, confidence, expiry, deal value, and site-wide relevance. Expired codes are greyed out and sorted last.
+
+If a coupon page fails — HTTP error, timeout, empty shell, or bot challenge — the next configured URL is tried. The sync timestamp only moves forward when at least one page loaded successfully, so an outage is retried on the next visit instead of parking the finder for six hours; a ten-minute backoff prevents hammering a blocked host on every navigation.
 
 Coupon extraction is best-effort. Campaign codes and login-gated offers change frequently, so an empty list is not necessarily a bug.
 
@@ -298,8 +306,10 @@ All data stays in your browser, inside your userscript manager's storage. There 
 | `jumia_gh_price_history` | both sites | Products and price samples (JSON object). |
 | `jumia_gh_coupons` | Jumia | Cached Jumia coupons (JSON array). |
 | `aliexpress_coupons` | AliExpress | Cached AliExpress coupons (JSON array). |
-| `jumia_gh_coupons_last_fetch` | Jumia | Last coupon sync timestamp (ms). |
-| `aliexpress_coupons_last_fetch` | AliExpress | Last coupon sync timestamp (ms). |
+| `jumia_gh_coupons_last_fetch` | Jumia | Last successful coupon sync timestamp (ms). |
+| `aliexpress_coupons_last_fetch` | AliExpress | Last successful coupon sync timestamp (ms). |
+| `jumia_gh_coupons_retry_after` | Jumia | Retry backoff after a failed sync (ms timestamp). |
+| `aliexpress_coupons_retry_after` | AliExpress | Retry backoff after a failed sync (ms timestamp). |
 | `jumia_gh_coupons_show_all` | Jumia | Whether the coupon list shows all codes. |
 | `aliexpress_coupons_show_all` | AliExpress | Whether the coupon list shows all codes. |
 | `jumia_gh_smart_watch` | both sites | Whether the opt-in smart watch is enabled (`true`/`false`). |
@@ -352,6 +362,28 @@ Product keys:
 
 - Jumia: the URL slug before `.html` (e.g. `samsung-galaxy-a15-128gb`).
 - AliExpress: `ali:` + item ID (e.g. `ali:1005006187992416`).
+
+### Coupon schema
+
+```json
+[
+  {
+    "code": "SAVE15",
+    "description": "15% off Samsung Galaxy phones",
+    "source": "https://www.jumia.com.gh/coupons/",
+    "firstSeen": 1730000000000,
+    "lastSeen": 1730200000000,
+    "expiry": 1735689599999,
+    "hits": 3,
+    "confidence": "high"
+  }
+]
+```
+
+- `confidence` — `high` (data attribute, coupon input, or dedicated code field), `medium` (coupon card or explicit context), or `low` (meta description or page sentence).
+- `expiry` — display-only timestamp; expired codes are greyed out and ranked last but never deleted automatically.
+- `hits` — how many times the code has been seen; used as a small ranking signal.
+- `source` — page URL that produced the most recent sighting.
 
 ### Network requests
 
@@ -466,7 +498,7 @@ npm install jsdom
 node tests/smartwatch.test.cjs
 ```
 
-Smart-watch tests should cover: `304` handling, the daily budget cap, canary campaign detection, target prioritisation, AliExpress skipping, visit-side metadata updates, target merging, open-dashboard refresh with change badges, dashboard window geometry (drag, snap, maximize, minimize, persistence), panel dragging/persistence, listing-change detection (visit + redirected background fetch), and the per-product history view. A headless Chromium screenshot is useful for layout checks:
+Smart-watch tests should cover: `304` handling, the daily budget cap, canary campaign detection, target prioritisation, AliExpress skipping, visit-side metadata updates, target merging, open-dashboard refresh with change badges, dashboard window geometry (drag, snap, maximize, minimize, persistence), panel dragging/persistence, listing-change detection (visit + redirected background fetch), the per-product history view, and coupon extraction/ranking/sync failure. A headless Chromium screenshot is useful for layout checks:
 
 ```bash
 msedge --headless=new --disable-gpu --hide-scrollbars \
@@ -499,7 +531,7 @@ The project follows a pragmatic `MAJOR.MINOR.PATCH` scheme:
 - **MINOR** — new sites, major features, new dashboard capabilities.
 - **PATCH** — bug fixes, selector updates, styling and documentation fixes.
 
-Current release: **3.9.0** — seller-edited listings are flagged instead of showing a fake 99% drop, and every product has a chart plus full price-change history. See [`CHANGELOG.md`](CHANGELOG.md).
+Current release: **3.10.0** — the coupon finder is smarter and far more resilient, with confidence tiers, deal badges, and outage-safe sync. See [`CHANGELOG.md`](CHANGELOG.md).
 
 ---
 

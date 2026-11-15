@@ -2,6 +2,21 @@
 
 All notable changes to this project are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions use `MAJOR.MINOR.PATCH`.
 
+## [3.10.0] — 2026-11-15
+
+### Added
+- **Confidence-aware coupon extraction.** Codes are read from `data-code` / clipboard attributes, coupon input values, dedicated code fields, short coupon cards (including copy-to-redeem cards), meta descriptions, and page sentences. Each sighting records a `confidence` tier (`high` / `medium` / `low`).
+- **Deal badges.** Each coupon shows its value where it can be parsed: `15% off`, `GH₵ 50 off`, `Free shipping`, or the minimum spend. The panel status line reports how many stored codes are still usable.
+- **Broader expiry parsing.** Supports ISO dates and datetimes, `30 Nov 2026`, `Nov 30, 2026`, day/month without a year, `31/12/2026`, relative windows (“valid for 7 days”, “2 weeks left”), and today/tonight/tomorrow. Impossible dates are ignored.
+- **Ranking v2.** Product-token relevance, site-wide wording, freshness, confidence, repeat sightings, deal size, and minimum spend are scored together; expired codes sink to the bottom.
+
+### Changed
+- **Stricter validation.** Prices (`GHS50`), specs (`128GB`), years (`2024`), numeric IDs, dictionary words, and repeated junk (`HELPHELP`) are rejected. Codes must contain a letter, and sentence words after “coupon” (for example “available”) can no longer become codes.
+- **Custom `CONTEXT_RE`.** The context pattern now captures the keyword separately, supports en/em dashes, and avoids treating bare “coupon” as a strong code signal.
+- **Resilient coupon sync.** HTTP errors, timeouts, empty shells, and bot challenges are distinguished from a genuine empty page; the next configured URL is tried, and the six-hour timestamp only advances after at least one page loaded successfully. A ten-minute `*_coupons_retry_after` backoff prevents hammering a blocked host while still recovering quickly.
+- **Inline text handling.** Coupon cards are read with spaces between child elements, so inline markup cannot invent codes by concatenation (`ISO31Expires`).
+- `mergeCoupons` keeps the strongest confidence, longest description, latest expiry, and earliest first-seen time for a code.
+
 ## [3.9.0] — 2026-11-14
 
 ### Added
