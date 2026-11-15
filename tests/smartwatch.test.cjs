@@ -421,6 +421,59 @@ test('background price change updates and highlights the open dashboard', async 
     assert(betaFlag && /12\.5%/.test(betaFlag.textContent), 'beta badge shows the new movement');
 });
 
+// ── Sort preference persists across dashboard reopens ─────────────────
+test('dashboard sort choice persists across close and reopen', async () => {
+    const now = realNow;
+    const history = {
+        fresh: {
+            name: 'Fresh Phone', url: 'https://www.jumia.com.gh/fresh.html', site: 'jumia', currency: 'GHS',
+            created: now - 5 * DAY,
+            samples: [
+                { p: 100, t: now - 72 * HOUR },
+                { p: 90, t: now - 48 * HOUR },
+                { p: 90, t: now - 10 * 60 * 1000 },
+            ],
+        },
+        recent: {
+            name: 'Recent Drop', url: 'https://www.jumia.com.gh/recent.html', site: 'jumia', currency: 'GHS',
+            created: now - 5 * DAY,
+            samples: [
+                { p: 100, t: now - 50 * HOUR },
+                { p: 80, t: now - 1 * HOUR },
+            ],
+        },
+    };
+    const env = await makeEnv({
+        storage: { ...seedHistory(history), jumia_gh_coupons_last_fetch: now },
+    });
+    const doc = env.win.document;
+    const names = () => [...doc.querySelectorAll('.jtm-row .jtm-name-text')].map(e => e.textContent);
+
+    await openDashboard(env);
+    const sortSel = doc.querySelector('.jtm-sort');
+    assert.strictEqual(sortSel.value, 'recent', 'default sort is Recent');
+    assert.deepStrictEqual(names(), ['Fresh Phone', 'Recent Drop'], 'Recent orders by last sample');
+
+    sortSel.value = 'changed';
+    sortSel.dispatchEvent(new env.win.Event('change'));
+    assert.deepStrictEqual(names(), ['Recent Drop', 'Fresh Phone'], 'Recent changes orders by last move');
+    assert.strictEqual(env.store.get('jumia_gh_dash_sort'), 'changed', 'choice is stored');
+
+    doc.querySelector('#price-tracker-modal .jtm-close').click();
+    await flush();
+    assert(!doc.getElementById('price-tracker-modal'), 'dashboard closed');
+
+    await openDashboard(env);
+    assert.strictEqual(doc.querySelector('.jtm-sort').value, 'changed', 'sort restored on reopen');
+    assert.deepStrictEqual(names(), ['Recent Drop', 'Fresh Phone'], 'restored sort is applied');
+
+    const env2 = await makeEnv({
+        storage: { ...seedHistory(history), jumia_gh_coupons_last_fetch: now, jumia_gh_dash_sort: 'nonsense' },
+    });
+    await openDashboard(env2);
+    assert.strictEqual(env2.win.document.querySelector('.jtm-sort').value, 'recent', 'invalid stored sort falls back');
+});
+
 // ── 9. Returning to a hidden tab re-reads history for an open dashboard ──
 test('returning to the tab refreshes the dashboard after another tab changed a price', async () => {
     const key = 'p1';

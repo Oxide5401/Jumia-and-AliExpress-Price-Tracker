@@ -2,7 +2,7 @@
 
 A single Tampermonkey/Violentmonkey userscript that tracks product prices on **Jumia Ghana** (`jumia.com.gh`) and **AliExpress** (Ghana shipping, GHS), finds and stores coupon codes, and shows everything in one dashboard — including **product thumbnails**.
 
-![Version](https://img.shields.io/badge/version-3.10.2-orange)
+![Version](https://img.shields.io/badge/version-3.10.3-orange)
 ![License](https://img.shields.io/badge/license-MIT-blue)
 ![Platform](https://img.shields.io/badge/platform-Tampermonkey%20%7C%20Violentmonkey-2ea44f)
 
@@ -92,7 +92,7 @@ A single Tampermonkey/Violentmonkey userscript that tracks product prices on **J
 
 ### Dashboard
 - One list for both sites, with a `Jumia` / `AliExpress` tag per row.
-- Search by name; sort by recent changes, recent, biggest drop/rise, lowest/highest price, or name.
+- Search by name; sort by recent changes, recent, biggest drop/rise, lowest/highest price, or name. Your last sort choice is remembered the next time you open the dashboard.
 - Per-row current / low / high / change, a target button, a price-history button, and a delete button.
 - `↓` / `↑` badges and a soft tint mark products that moved within the last 7 days; a `⚠ listing` badge marks likely seller edits.
 - **📈 Price history** per row: a chart of every sample plus a newest-first list of all price changes.
@@ -207,7 +207,7 @@ Coupon extraction is best-effort. Campaign codes and login-gated offers change f
 Open it with the 📊 button in the panel.
 
 - **Filter by name** — case-insensitive substring match; blank stored names still match their fallback label.
-- **Sort** — Recent changes (last real price movement), Recent (last sample), Biggest drop, Biggest rise, Lowest price, Highest price, Name.
+- **Sort** — Recent changes (last real price movement), Recent (last sample), Biggest drop, Biggest rise, Lowest price, Highest price, Name. Your choice is saved and restored the next time the dashboard opens.
 - **Rows** — site tag, thumbnail, change badge, name (tooltip shows the full stored name), target, current, low, high, change, price history, delete.
 - **Live updates** — if a background check or the page you are on records a new price, the open dashboard refreshes in place and keeps your filter, sort, and scroll position.
 - **Change highlight** — a `↓` / `↑` badge and soft row tint mark movement within the last 7 days. The badge tooltip shows the old and new price.
@@ -316,6 +316,7 @@ All data stays in your browser, inside your userscript manager's storage. There 
 | `jumia_gh_smart_watch` | both sites | Whether the opt-in smart watch is enabled (`true`/`false`). |
 | `jumia_gh_smart_watch_state` | both sites | Scheduler state: per-product due dates, validators, canary signals, budget, host backoff (JSON). |
 | `jumia_gh_dash_window` | both sites | Dashboard window position, size, maximized state, and snap preference (JSON). |
+| `jumia_gh_dash_sort` | both sites | Last dashboard sort choice (`recent`, `changed`, `change-down`, `change-up`, `price-low`, `price-high`, `name`). |
 | `jumia_gh_panel_pos` | both sites | Floating panel position (`{ x, y }`), set once the panel has been dragged. |
 
 ### History schema
@@ -499,7 +500,7 @@ npm install jsdom
 node tests/smartwatch.test.cjs
 ```
 
-Smart-watch tests should cover: `304` handling, the daily budget cap, canary campaign detection, target prioritisation, AliExpress skipping, visit-side metadata updates, target merging, open-dashboard refresh with change badges, dashboard window geometry (drag, snap, maximize, minimize, persistence), panel dragging/persistence, listing-change detection (visit + redirected background fetch), the per-product history view, and coupon extraction/ranking/sync failure. A headless Chromium screenshot is useful for layout checks:
+Smart-watch tests should cover: `304` handling, the daily budget cap, canary campaign detection, target prioritisation, AliExpress skipping, visit-side metadata updates, target merging, open-dashboard refresh with change badges, dashboard window geometry (drag, snap, maximize, minimize, persistence), panel dragging/persistence, dashboard sort persistence, listing-change detection (visit + redirected background fetch), the per-product history view, and coupon extraction/ranking/sync failure. A headless Chromium screenshot is useful for layout checks:
 
 ```bash
 msedge --headless=new --disable-gpu --hide-scrollbars \
@@ -532,7 +533,7 @@ The project follows a pragmatic `MAJOR.MINOR.PATCH` scheme:
 - **MINOR** — new sites, major features, new dashboard capabilities.
 - **PATCH** — bug fixes, selector updates, styling and documentation fixes.
 
-Current release: **3.10.2** — square, rounded product thumbnails that keep their shape even under aggressive dark-mode/theme CSS. See [`CHANGELOG.md`](CHANGELOG.md).
+Current release: **3.10.3** — the dashboard remembers your sort choice, so opening it later shows the same ordering you picked. See [`CHANGELOG.md`](CHANGELOG.md).
 
 ---
 

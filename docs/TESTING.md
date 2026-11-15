@@ -136,6 +136,7 @@ These are the assertions worth keeping when changing extraction, storage, or UI.
 ### UI
 - Panel shows the product name and thumbnail after `updatePrice`/tracking.
 - Dashboard lists all products, filters by name, and sorts by recent changes/recent/drop/rise/price/name.
+- Choosing a sort writes `jumia_gh_dash_sort`, closing and reopening the dashboard restores the same choice and ordering, and an invalid stored value falls back to **Recent**.
 - Site tags render correctly (`Jumia` grey, `AliExpress` red).
 - Export produces parseable JSON; Import → Merge reports the correct product/sample counts.
 - Under hostile CSS (`a { color: transparent !important; -webkit-text-fill-color: transparent !important }`), names, tags, and the footer buttons remain visible.

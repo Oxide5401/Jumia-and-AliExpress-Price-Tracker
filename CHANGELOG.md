@@ -2,6 +2,11 @@
 
 All notable changes to this project are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions use `MAJOR.MINOR.PATCH`.
 
+## [3.10.3] — 2026-11-15
+
+### Added
+- **Remembered dashboard sort.** The sort dropdown now saves your choice to `jumia_gh_dash_sort` and restores it the next time the dashboard opens, so selecting **Recent changes** keeps that ordering instead of falling back to **Recent**. Invalid or missing values fall back safely to **Recent**.
+
 ## [3.10.2] — 2026-11-15
 
 ### Fixed

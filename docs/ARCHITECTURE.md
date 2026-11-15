@@ -328,6 +328,7 @@ The panel is draggable by its title bar, using the same pattern as the dashboard
   - **Change badge:** `<span class="jtm-flag down|up">` with `↓`/`↑` and the percentage move, shown only when the movement is within `CONFIG.watch.changeHighlightMs` (7 days). The row also gets `.changed` plus `.down`/`.up` for tinting.
   - **Target:** `<button class="jtm-target">`; shows `🎯 set` when unset, the formatted target when set, and a green `.met` state when the current price is at/below it. Clicking calls `editTarget`.
 - The sort menu includes **Recent changes**, which orders by `latestChange(...).t` with the last sample time as a tie-breaker.
+- The chosen sort is written to `jumia_gh_dash_sort` on `change` and read on every fresh render, so reopening the dashboard restores it. Unknown values fall back to `recent`.
 - A capture-phase `error` listener on the modal swaps broken images for the placeholder (image `error` events do not bubble).
 - Footer actions: Export, Import (merge), Fetch images, Clear All.
 

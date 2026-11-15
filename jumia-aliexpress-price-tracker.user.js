@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jumia Ghana – Price Tracker + Coupons + Dashboard
 // @namespace    https://github.com/yourname/jumia-price-tracker
-// @version      3.10.2
+// @version      3.10.3
 // @description  Robust price tracker with product images, persistent coupon finder, and tracking dashboard for jumia.com.gh and aliexpress.com (Ghana / GHS)
 // @author       Oxide5401
 // @homepageURL  https://github.com/Oxide5401/Jumia-and-AliExpress-Price-Tracker
@@ -92,6 +92,7 @@
         uiPanelId: 'price-tracker-panel',
         trackedModalId: 'price-tracker-modal',
         dashWindowKey: 'jumia_gh_dash_window',
+        dashSortKey: 'jumia_gh_dash_sort',
         panelPosKey: 'jumia_gh_panel_pos',
         notificationTimeout: 10000,
         couponPageUrls: SITE.couponPageUrls,
@@ -3472,13 +3473,21 @@
             </div>`;
     }
 
+    const DASH_SORTS = new Set(['recent', 'changed', 'change-down', 'change-up', 'price-low', 'price-high', 'name']);
+
+    function rememberDashSort(value) {
+        if (DASH_SORTS.has(value)) GM_setValue(CONFIG.dashSortKey, value);
+    }
+
     function renderTrackedModal(preserve = false) {
         const modal = document.getElementById(CONFIG.trackedModalId);
         if (!modal) return;
         const body = modal.querySelector('.jtm-body');
         const countEl = modal.querySelector('.jtm-count');
         const prevSearch = preserve ? (modal.querySelector('.jtm-search')?.value || '') : '';
-        const prevSort = preserve ? (modal.querySelector('.jtm-sort')?.value || 'recent') : 'recent';
+        const savedSort = GM_getValue(CONFIG.dashSortKey, 'recent');
+        const rememberedSort = DASH_SORTS.has(savedSort) ? savedSort : 'recent';
+        const prevSort = preserve ? (modal.querySelector('.jtm-sort')?.value || rememberedSort) : rememberedSort;
         const prevScroll = preserve ? body.scrollTop : 0;
         const history = loadHistory();
         const now = Date.now();
@@ -3604,7 +3613,10 @@
             }).join('');
         }
         search.addEventListener('input', renderList);
-        sortSel.addEventListener('change', renderList);
+        sortSel.addEventListener('change', () => {
+            rememberDashSort(sortSel.value);
+            renderList();
+        });
         renderList();
         body.scrollTop = prevScroll;
         renderWatchStatus();
