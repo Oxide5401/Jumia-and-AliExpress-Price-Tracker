@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jumia Ghana – Price Tracker + Coupons + Dashboard
 // @namespace    https://github.com/yourname/jumia-price-tracker
-// @version      3.10.1
+// @version      3.10.2
 // @description  Robust price tracker with product images, persistent coupon finder, and tracking dashboard for jumia.com.gh and aliexpress.com (Ghana / GHS)
 // @author       Oxide5401
 // @homepageURL  https://github.com/Oxide5401/Jumia-and-AliExpress-Price-Tracker
@@ -2263,15 +2263,21 @@
             #${CONFIG.uiPanelId} .jpt-product {
                 display: flex; align-items: center; gap: 8px; margin-bottom: 8px;
             }
+            /* Rounded square. Only dark-alpha tints are used, and the
+               container never clips, so external light-theme/dark-mode
+               passes that force a huge border-radius on light backgrounds
+               cannot turn the thumbnail into a circle. */
             #${CONFIG.uiPanelId} .jpt-thumb {
                 flex: 0 0 44px; width: 44px; height: 44px; aspect-ratio: 1 / 1;
                 display: flex; align-items: center; justify-content: center;
-                border: 1px solid #e5e5e5; border-radius: 10px; background: #fafafa;
-                overflow: hidden; font-size: 18px; color: #b5b5b5;
+                border-radius: 10px; background: transparent;
+                font-size: 18px; color: #b5b5b5;
             }
+            #${CONFIG.uiPanelId} .jpt-thumb-empty { background: rgba(0, 0, 0, 0.04); }
             #${CONFIG.uiPanelId} .jpt-thumb img {
                 width: 100%; height: 100%; object-fit: cover;
                 border-radius: 9px; display: block;
+                box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.06);
             }
             #${CONFIG.uiPanelId} .jpt-product-name {
                 flex: 1; min-width: 0; font-size: 12px; font-weight: 600;
@@ -2835,16 +2841,21 @@
                 display: flex; align-items: center; gap: 8px; min-width: 0;
                 font-weight: 600; color: #222;
             }
+            /* Same rounded-square rules as the panel thumbnail: transparent
+               container, no overflow clipping, radius and hairline on the
+               image so outside radius overrides cannot circle the crop. */
             #${CONFIG.trackedModalId} .jtm-thumb {
                 flex: 0 0 44px; width: 44px; height: 44px; aspect-ratio: 1 / 1;
                 display: flex; align-items: center; justify-content: center;
-                border: 1px solid #e8e8e8; border-radius: 10px; background: #fafafa;
-                overflow: hidden; font-size: 17px; color: #b5b5b5;
+                border-radius: 10px; background: transparent;
+                font-size: 17px; color: #b5b5b5;
                 font-weight: 400;
             }
+            #${CONFIG.trackedModalId} .jtm-thumb-empty { background: rgba(0, 0, 0, 0.04); }
             #${CONFIG.trackedModalId} .jtm-thumb img {
                 width: 100%; height: 100%; object-fit: cover;
                 border-radius: 9px; display: block;
+                box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.06);
             }
             #${CONFIG.trackedModalId} .jtm-name-main {
                 display: flex; align-items: center; min-width: 0; overflow: hidden;

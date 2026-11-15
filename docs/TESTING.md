@@ -129,6 +129,7 @@ These are the assertions worth keeping when changing extraction, storage, or UI.
 - Logos/sprites/data URLs are rejected.
 - A product with an image renders `<img>`; one without renders the 🛍 placeholder.
 - Panel and dashboard thumbnails are 44 × 44 px squares with a 10 px radius; wide (320 × 120) and tall (120 × 320) source images both fill the frame via `object-fit: cover` without distortion.
+- With a forced `border-radius: 34px !important` on the thumbnail containers (simulating a dark-mode/theme userscript), the images still render as rounded squares because the radius lives on the `<img>` and the container neither clips nor uses a light background.
 - `backfillImages` stores an image for a product whose fetched page has metadata, and leaves a 403 page without an image.
 - A simulated `error` event swaps a broken thumbnail for the placeholder (capture-phase listener).
 

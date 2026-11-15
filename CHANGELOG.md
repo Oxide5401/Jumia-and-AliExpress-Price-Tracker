@@ -2,6 +2,11 @@
 
 All notable changes to this project are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions use `MAJOR.MINOR.PATCH`.
 
+## [3.10.2] — 2026-11-15
+
+### Fixed
+- **Thumbnails stay square under aggressive theme CSS.** Some dark-mode/theme userscripts rewrite light-background elements with a large inline `border-radius: … !important`; with the old light thumbnail tile plus `overflow: hidden`, a 44 px thumbnail could be clipped into a circle. The thumbnail container is now transparent and no longer clips, the 10 px radius and hairline border live on the `<img>`, and the empty-state tint uses a dark-alpha colour. External radius overrides can no longer reshape the image.
+
 ## [3.10.1] — 2026-11-15
 
 ### Changed

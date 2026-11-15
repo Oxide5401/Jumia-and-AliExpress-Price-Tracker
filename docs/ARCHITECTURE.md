@@ -211,6 +211,8 @@ AliExpress frequently serves a challenge page to these requests; failures are ex
 
 Thumbnails (`.jpt-thumb` in the panel, `.jtm-thumb` in the dashboard) are fixed 44 × 44 px squares with a 10 px radius; the inner `<img>` uses `object-fit: cover` and a 9 px radius. `cover` keeps every source aspect ratio visually consistent instead of letterboxing wide or tall product photos.
 
+The container is deliberately transparent (with no `overflow: hidden`), the radius and hairline live on the `<img>`, and the empty-state tint uses `rgba(0, 0, 0, 0.04)` rather than a light hex colour. Dark-mode/theme userscripts commonly rewrite light-background elements with a large `border-radius: … !important`; because those passes skip media elements and only touch light backgrounds, the image keeps its own rounded-square crop and no outer clip can turn it into a circle.
+
 ---
 
 ## 7b. Smart watch scheduler
