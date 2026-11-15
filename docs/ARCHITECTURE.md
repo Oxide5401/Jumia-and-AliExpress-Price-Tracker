@@ -209,6 +209,8 @@ extractImage()             // live page, cached per URL
 
 AliExpress frequently serves a challenge page to these requests; failures are expected and logged, not fatal.
 
+Thumbnails (`.jpt-thumb` in the panel, `.jtm-thumb` in the dashboard) are fixed 44 × 44 px squares with a 10 px radius; the inner `<img>` uses `object-fit: cover` and a 9 px radius. `cover` keeps every source aspect ratio visually consistent instead of letterboxing wide or tall product photos.
+
 ---
 
 ## 7b. Smart watch scheduler

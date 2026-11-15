@@ -2,7 +2,7 @@
 
 A single Tampermonkey/Violentmonkey userscript that tracks product prices on **Jumia Ghana** (`jumia.com.gh`) and **AliExpress** (Ghana shipping, GHS), finds and stores coupon codes, and shows everything in one dashboard — including **product thumbnails**.
 
-![Version](https://img.shields.io/badge/version-3.10.0-orange)
+![Version](https://img.shields.io/badge/version-3.10.1-orange)
 ![License](https://img.shields.io/badge/license-MIT-blue)
 ![Platform](https://img.shields.io/badge/platform-Tampermonkey%20%7C%20Violentmonkey-2ea44f)
 
@@ -54,6 +54,7 @@ A single Tampermonkey/Violentmonkey userscript that tracks product prices on **J
 - Resolution order: `og:image` → JSON-LD `Product.image` → site gallery selectors.
 - Stores the image URL with the product, so thumbnails appear in the panel and dashboard.
 - Graceful 🛍 placeholder when an image is missing, blocked, or fails to load.
+- Thumbnails are **square with rounded corners** and crop to fill, so portrait, landscape, and square source images all look consistent in the panel and dashboard.
 - **Fetch images** button backfills images for products tracked by older versions.
 
 ### Price-change highlighting (new in 3.6.0)
@@ -531,7 +532,7 @@ The project follows a pragmatic `MAJOR.MINOR.PATCH` scheme:
 - **MINOR** — new sites, major features, new dashboard capabilities.
 - **PATCH** — bug fixes, selector updates, styling and documentation fixes.
 
-Current release: **3.10.0** — the coupon finder is smarter and far more resilient, with confidence tiers, deal badges, and outage-safe sync. See [`CHANGELOG.md`](CHANGELOG.md).
+Current release: **3.10.1** — product thumbnails are now square with rounded corners, cropped to fill for a consistent look across both sites. See [`CHANGELOG.md`](CHANGELOG.md).
 
 ---
 

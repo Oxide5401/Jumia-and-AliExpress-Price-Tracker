@@ -2,6 +2,11 @@
 
 All notable changes to this project are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions use `MAJOR.MINOR.PATCH`.
 
+## [3.10.1] — 2026-11-15
+
+### Changed
+- **Square, rounded thumbnails.** Panel and dashboard thumbnails are now 44 × 44 px squares with a 10 px radius and a 9 px image radius. Images use `object-fit: cover`, so portrait, landscape, and square product photos all fill the same rounded frame without distortion or letterboxing.
+
 ## [3.10.0] — 2026-11-15
 
 ### Added

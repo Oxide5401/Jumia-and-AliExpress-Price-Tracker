@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jumia Ghana – Price Tracker + Coupons + Dashboard
 // @namespace    https://github.com/yourname/jumia-price-tracker
-// @version      3.10.0
+// @version      3.10.1
 // @description  Robust price tracker with product images, persistent coupon finder, and tracking dashboard for jumia.com.gh and aliexpress.com (Ghana / GHS)
 // @author       Oxide5401
 // @homepageURL  https://github.com/Oxide5401/Jumia-and-AliExpress-Price-Tracker
@@ -2264,13 +2264,14 @@
                 display: flex; align-items: center; gap: 8px; margin-bottom: 8px;
             }
             #${CONFIG.uiPanelId} .jpt-thumb {
-                flex: 0 0 40px; width: 40px; height: 40px;
+                flex: 0 0 44px; width: 44px; height: 44px; aspect-ratio: 1 / 1;
                 display: flex; align-items: center; justify-content: center;
-                border: 1px solid #e5e5e5; border-radius: 6px; background: #fafafa;
+                border: 1px solid #e5e5e5; border-radius: 10px; background: #fafafa;
                 overflow: hidden; font-size: 18px; color: #b5b5b5;
             }
             #${CONFIG.uiPanelId} .jpt-thumb img {
-                width: 100%; height: 100%; object-fit: contain; display: block;
+                width: 100%; height: 100%; object-fit: cover;
+                border-radius: 9px; display: block;
             }
             #${CONFIG.uiPanelId} .jpt-product-name {
                 flex: 1; min-width: 0; font-size: 12px; font-weight: 600;
@@ -2835,14 +2836,15 @@
                 font-weight: 600; color: #222;
             }
             #${CONFIG.trackedModalId} .jtm-thumb {
-                flex: 0 0 40px; width: 40px; height: 40px;
+                flex: 0 0 44px; width: 44px; height: 44px; aspect-ratio: 1 / 1;
                 display: flex; align-items: center; justify-content: center;
-                border: 1px solid #e8e8e8; border-radius: 6px; background: #fafafa;
+                border: 1px solid #e8e8e8; border-radius: 10px; background: #fafafa;
                 overflow: hidden; font-size: 17px; color: #b5b5b5;
                 font-weight: 400;
             }
             #${CONFIG.trackedModalId} .jtm-thumb img {
-                width: 100%; height: 100%; object-fit: contain; display: block;
+                width: 100%; height: 100%; object-fit: cover;
+                border-radius: 9px; display: block;
             }
             #${CONFIG.trackedModalId} .jtm-name-main {
                 display: flex; align-items: center; min-width: 0; overflow: hidden;
