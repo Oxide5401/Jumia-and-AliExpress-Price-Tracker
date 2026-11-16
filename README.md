@@ -2,7 +2,7 @@
 
 A single Tampermonkey/Violentmonkey userscript that tracks product prices on **Jumia Ghana** (`jumia.com.gh`) and **AliExpress** (Ghana shipping, GHS), finds and stores coupon codes, and shows everything in one dashboard — including **product thumbnails**.
 
-![Version](https://img.shields.io/badge/version-3.11.0-orange)
+![Version](https://img.shields.io/badge/version-3.11.1-orange)
 ![License](https://img.shields.io/badge/license-MIT-blue)
 ![Platform](https://img.shields.io/badge/platform-Tampermonkey%20%7C%20Violentmonkey-2ea44f)
 
@@ -76,7 +76,7 @@ A single Tampermonkey/Violentmonkey userscript that tracks product prices on **J
 - **Opt-out, not forced.** Turn **💸 Cheaper alternatives** on or off from either the panel or the dashboard. It is **on by default**.
 - **Sensible notifications.** A notification fires only when the match is at least **3% and GH₵ 1 cheaper**, and at most once per product per **24 hours**.
 - **Delivery badges.** Jumia products show **⚡ Jumia Express**, **✈ Ships from abroad** (when the page says so), or **🏬 Marketplace seller** in the panel and dashboard.
-- **One-click add.** A **💰 Track price** button appears directly under the Jumia wishlist heart and opens the dashboard with the product added.
+- **One-click add.** A **💰 Track price** button appears directly under the wishlist heart on Jumia product pages **and on every product card in listing/search results**, so you can add an item without opening it. Tracked items read **Tracked — open**.
 - Checks are throttled to **once per product every 12 hours**; AliExpress is not searched.
 
 ### Smart watch (new in 3.5.0, off by default)
@@ -201,6 +201,8 @@ Your data is still attached to the original script. Rescue it like this:
 Prices are recorded automatically shortly after a product page loads. If extraction fails, the script retries with a site-specific backoff (20 attempts on Jumia, 40 on AliExpress).
 
 On Jumia product pages, a **💰 Track price** button is inserted directly under the wishlist heart. Click it to add the product (if it was not recorded yet) and open the dashboard.
+
+The same button appears under the heart on every card in Jumia search, category, and listing pages. Click **Track price** on a card to record that card's price, image, brand, and delivery type without opening it; the dashboard opens with the item added, and the button changes to **Tracked — open**. Clicking a tracked card just opens the dashboard, so browsing a page twice never adds duplicate samples. New cards from infinite scroll or filtering are picked up automatically.
 
 ### Cheaper alternatives & delivery badges
 
@@ -582,7 +584,7 @@ The project follows a pragmatic `MAJOR.MINOR.PATCH` scheme:
 - **MINOR** — new sites, major features, new dashboard capabilities.
 - **PATCH** — bug fixes, selector updates, styling and documentation fixes.
 
-Current release: **3.11.0** — cheaper-alternative matching, Jumia Express/abroad delivery badges, and a one-click **Track price** button under the wishlist heart. See [`CHANGELOG.md`](CHANGELOG.md).
+Current release: **3.11.1** — cheaper-alternative matching, Jumia Express/abroad delivery badges, and one-click **Track price** buttons on product pages and result cards. See [`CHANGELOG.md`](CHANGELOG.md).
 
 ---
 

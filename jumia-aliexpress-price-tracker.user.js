@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Jumia Ghana – Price Tracker + Coupons + Dashboard
 // @namespace    https://github.com/yourname/jumia-price-tracker
-// @version      3.11.0
-// @description  Price tracker with product images, cheaper-alternative finder, Jumia Express/abroad badges, coupons, and a tracking dashboard for jumia.com.gh and aliexpress.com (Ghana / GHS)
+// @version      3.11.1
+// @description  Price tracker with product images, cheaper-alternative finder, Jumia Express/abroad badges, one-click tracking from result cards, coupons, and a tracking dashboard for jumia.com.gh and aliexpress.com (Ghana / GHS)
 // @author       Oxide5401
 // @homepageURL  https://github.com/Oxide5401/Jumia-and-AliExpress-Price-Tracker
 // @supportURL   https://github.com/Oxide5401/Jumia-and-AliExpress-Price-Tracker/issues
@@ -200,8 +200,10 @@
         const n = formatPrice(num);
         return sym ? `${sym} ${n}` : `${cur} ${n}`;
     }
-    function getProductKey() {
-        const path = new URL(location.href).pathname;
+    function productKeyFromUrl(href) {
+        let path;
+        try { path = new URL(href, location.origin).pathname; }
+        catch { return ''; }
         if (IS_ALI) {
             // /item/1005006187992416.html, /i/1005006187992416.html, m.aliexpress.com/item/…
             const m = path.match(/\/(?:item|i)\/(\d+)/);
@@ -209,6 +211,9 @@
         }
         const m = path.match(/([a-zA-Z0-9\-]+)\.html$/);
         return m ? m[1] : path;
+    }
+    function getProductKey() {
+        return productKeyFromUrl(location.href);
     }
     function escapeHtml(s) {
         return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({
@@ -1192,6 +1197,10 @@
         if (!body) return;
         if (!enabled) {
             body.innerHTML = '<span class="jpt-alts-off">Off — turn on to look for cheaper Jumia listings.</span>';
+            return;
+        }
+        if (!isProductPage()) {
+            body.innerHTML = '<span class="jpt-alts-off">Open a product, or use 💰 Track on a result card.</span>';
             return;
         }
         const key = getProductKey();
@@ -2847,6 +2856,22 @@
             .jpt-add-track:active { transform: translateY(1px); }
             .jpt-add-track.tracked { background: #e7f6ec; border-color: #bfe6cb; color: #0f7434; }
             .jpt-add-track .jpt-add-ico { font-size: 12px; line-height: 1; }
+            /* Listing/search cards: keep the heart top-right and add a compact
+               button directly below it, without disturbing the card layout. */
+            article.prd .jpt-card-col {
+                position: absolute; top: 0; right: 0; z-index: 4;
+                display: flex; flex-direction: column; align-items: flex-end;
+                gap: 4px; padding: 0;
+            }
+            article.prd .jpt-card-col .btn._wslt {
+                position: static; top: auto; right: auto; margin: 0;
+            }
+            article.prd .jpt-add-track.jpt-card-track {
+                padding: 2px 6px; border-radius: 4px;
+                font-size: 9px; line-height: 1.35;
+                box-shadow: 0 1px 3px rgba(0,0,0,.28);
+            }
+            article.prd .jpt-add-track.jpt-card-track .jpt-add-ico { font-size: 9px; }
         `);
 
         // ── Movable panel: drag the header, remember the position ──
@@ -3020,17 +3045,23 @@
         });
     }
 
-    // ── "Track price" button under the Jumia wishlist heart ───────
-    function syncTrackButton() {
-        const btn = document.querySelector('.jpt-add-track');
+    // ── "Track price" buttons: product page + listing cards ──────
+    function setTrackBtnState(btn, tracked) {
         if (!btn) return;
-        const tracked = !!loadHistory()[getProductKey()];
         btn.classList.toggle('tracked', tracked);
         const txt = btn.querySelector('.jpt-add-txt');
         if (txt) txt.textContent = tracked ? 'Tracked — open' : 'Track price';
         btn.title = tracked
             ? 'Already in your price tracker — click to open the dashboard'
             : 'Add this product to your price tracker';
+    }
+
+    /** Re-reads storage so every injected button shows the right state. */
+    function syncTrackButtons() {
+        const h = loadHistory();
+        document.querySelectorAll('.jpt-add-track[data-key]').forEach(btn => {
+            setTrackBtnState(btn, !!h[btn.dataset.key]);
+        });
     }
 
     function onAddTrackClick() {
@@ -3049,13 +3080,18 @@
                 return;
             }
         }
-        syncTrackButton();
+        syncTrackButtons();
         openTrackedModal();
     }
 
     function initTrackButton() {
         if (SITE.id !== 'jumia' || !isProductPage()) return;
-        if (document.querySelector('.jpt-add-track')) { syncTrackButton(); return; }
+        const existing = document.querySelector('.jpt-add-col .jpt-add-track');
+        if (existing) {
+            existing.dataset.key = getProductKey();
+            syncTrackButtons();
+            return;
+        }
         const wish = document.querySelector('#wishlist') ||
             document.querySelector('a[data-track-onclick="wishlist"]');
         if (!wish || !wish.parentElement) return;
@@ -3068,16 +3104,147 @@
         const btn = document.createElement('button');
         btn.type = 'button';
         btn.className = 'jpt-add-track';
+        btn.dataset.key = getProductKey();
         btn.innerHTML = '<span class="jpt-add-ico">💰</span><span class="jpt-add-txt">Track price</span>';
         btn.addEventListener('click', onAddTrackClick);
         col.appendChild(btn);
-        syncTrackButton();
+        syncTrackButtons();
+    }
+
+    // ── Listing/search cards: the same button under each heart ───
+    /** Reads name, price, brand, image and badges from one result card. */
+    function cardProductInfo(card) {
+        const link = card.querySelector('a.core[href]');
+        if (!link) return null;
+        let url;
+        try { url = new URL(link.getAttribute('href'), 'https://www.jumia.com.gh').href.split(/[?#]/)[0]; }
+        catch { return null; }
+        const key = productKeyFromUrl(url);
+        if (!key) return null;
+
+        const info = card.querySelector('.info') || card;
+        const nameEl = info.querySelector('.name') || card.querySelector('.name');
+        const name = cleanProductName(nameEl
+            ? nameEl.textContent
+            : (link.getAttribute('data-gtm-name') || ''));
+        const priceEl = info.querySelector('.prc') || card.querySelector('.prc');
+        const price = parsePrice(priceEl ? priceEl.textContent : '');
+        const img = card.querySelector('img.img');
+        const image = absoluteImage(
+            img && (img.getAttribute('data-src') || img.getAttribute('src')),
+            'https://www.jumia.com.gh'
+        );
+        const brand = cleanProductName(
+            link.getAttribute('data-ga4-item_brand') || link.getAttribute('data-gtm-brand') || ''
+        );
+        const cardText = card.textContent || '';
+        const express = !!card.querySelector('.bdg._xprs');
+        const abroad = /(?:ships?|shipped|shipping)\s+from\s+abroad/i.test(cardText) ||
+            !!card.querySelector('.bdg._glb, .bdg._gbl');
+        return {
+            key, url, name, price, image, brand, express, abroad,
+            fulfilment: {
+                kind: express ? 'express' : abroad ? 'abroad' : 'local',
+                express, abroad,
+            },
+        };
+    }
+
+    /** Records a product straight from a result card (no product page needed). */
+    function recordCardProduct(card) {
+        const info = cardProductInfo(card);
+        if (!info || !(info.price > 0)) return null;
+        const h = loadHistory();
+        const now = Date.now();
+        const product = h[info.key] || (h[info.key] = {
+            name: info.name, url: info.url, site: 'jumia', currency: 'GHS',
+            created: now, samples: [],
+        });
+        if (info.name) product.name = info.name;
+        if (info.image) product.image = info.image;
+        if (info.brand) product.brand = info.brand;
+        product.fulfilment = { ...info.fulfilment, checkedAt: now };
+        product.samples.push({ p: info.price, t: now, src: 'card' });
+        if (product.samples.length > CONFIG.maxSamplesPerProduct)
+            product.samples = product.samples.slice(-CONFIG.maxSamplesPerProduct);
+        saveHistory(h);
+        return { key: info.key, product, info };
+    }
+
+    function onCardTrackClick(card) {
+        const info = cardProductInfo(card);
+        if (!info) return;
+        if (!loadHistory()[info.key]) {
+            const result = recordCardProduct(card);
+            if (!result) {
+                const panel = document.getElementById(CONFIG.uiPanelId);
+                if (panel && panel.__showToast)
+                    panel.__showToast('Price not found on this card — open the product instead.');
+                return;
+            }
+            checkCheaperAlts(info.key);
+        }
+        updateTrackedBadge();
+        openTrackedModal();
+    }
+
+    /** Wraps each card heart and puts a compact track button below it. */
+    function initCardTrackButtons() {
+        if (SITE.id !== 'jumia' || isProductPage()) return;
+        let added = 0;
+        document.querySelectorAll('article.prd').forEach(card => {
+            if (card.querySelector('.jpt-add-track')) return;
+            const heart = card.querySelector('.btn._wslt, a[data-track-onclick="wishlist"]');
+            if (!heart || !heart.parentElement) return;
+            if (heart.closest('.jpt-card-col')) return;
+            const info = cardProductInfo(card);
+            if (!info) return;
+            // Show the tracked state even without a price, but don't add a
+            // dead button to an out-of-stock card.
+            if (!(info.price > 0) && !loadHistory()[info.key]) return;
+
+            const col = document.createElement('div');
+            col.className = 'jpt-card-col';
+            heart.parentElement.insertBefore(col, heart);
+            col.appendChild(heart);
+
+            const btn = document.createElement('button');
+            btn.type = 'button';
+            btn.className = 'jpt-add-track jpt-card-track';
+            btn.dataset.key = info.key;
+            btn.innerHTML = '<span class="jpt-add-ico">💰</span><span class="jpt-add-txt">Track price</span>';
+            btn.addEventListener('click', e => {
+                e.preventDefault();
+                e.stopPropagation();
+                onCardTrackClick(card);
+            });
+            col.appendChild(btn);
+            added++;
+        });
+        if (added) syncTrackButtons();
+    }
+
+    let cardScanTimer = null;
+    let cardObserver = null;
+    function scheduleCardScan() {
+        if (cardScanTimer) clearTimeout(cardScanTimer);
+        cardScanTimer = setTimeout(() => { cardScanTimer = null; initCardTrackButtons(); }, 350);
+    }
+    /** Listing pages lazy-load more cards, so re-scan when the DOM grows. */
+    function initCardTrackWatching() {
+        if (SITE.id !== 'jumia' || isProductPage()) return;
+        // Only observe pages that actually contain result cards.
+        if (!document.querySelector('article.prd')) return;
+        initCardTrackButtons();
+        if (cardObserver || typeof MutationObserver !== 'function') return;
+        cardObserver = new MutationObserver(scheduleCardScan);
+        cardObserver.observe(document.body, { childList: true, subtree: true });
     }
 
     function updateTrackedBadge() {
         const el = document.querySelector(`#${CONFIG.uiPanelId} .jpt-tracked-count`);
         if (el) el.textContent = Object.keys(loadHistory()).length;
-        syncTrackButton();
+        syncTrackButtons();
     }
     function updatePanel(result) {
         const panel = document.getElementById(CONFIG.uiPanelId);
@@ -4351,7 +4518,7 @@
             scanCurrentPageForCoupons();
             renderCoupons();
 
-            if (!isProductPage()) return;
+            if (!isProductPage()) { initCardTrackButtons(); return; }
             if (getProductKey() === lastTrackedKey) return; // same product, don't duplicate samples
             trackCurrentPage();
             initTrackButton();
@@ -4367,6 +4534,7 @@
 
         createPanel();
         updateTrackedBadge();
+        initCardTrackWatching();
 
         // Scan this page (strictly validated) and merge into the store.
         scanCurrentPageForCoupons();
@@ -4383,6 +4551,10 @@
         initSmartWatch();
 
         if (!isProductPage()) {
+            const cur = document.querySelector(`#${CONFIG.uiPanelId} .jpt-current`);
+            if (cur) cur.textContent = SITE.id === 'jumia'
+                ? 'Use 💰 Track price on a result card, or open a product.'
+                : 'Open a product page to track a price.';
             log('Not a product page — coupon + dashboard mode.');
             return;
         }

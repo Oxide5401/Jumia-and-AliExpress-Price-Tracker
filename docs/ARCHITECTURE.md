@@ -26,6 +26,7 @@ page load (document-end)
                                            └─ noteLivePrice() → scheduler metadata
                                            └─ checkCheaperAlts()  (Jumia, opt-out)
              initTrackButton()           💰 button under the wishlist heart
+             initCardTrackWatching()      💰 one button per result card
 ```
 
 A background smart-watch tick follows the same extraction path with fetched HTML:
@@ -63,14 +64,14 @@ The file is divided into nine commented sections, plus the matching-utility modu
 | Section | Responsibility | Key functions |
 | --- | --- | --- |
 | 1 | Site detection + config | `SITES`, `SITE`, `IS_ALI`, `CONFIG` |
-| 2 | Utilities | `parsePrice`, `detectCurrency`, `formatMoney`, `formatPrice`, `getProductKey`, `escapeHtml`, `truncate`, `cleanProductName`, `shortDuration`, `latestChange`, `displayName`, `setThumb`, `timeAgo`, `copyToClipboard` |
+| 2 | Utilities | `parsePrice`, `detectCurrency`, `formatMoney`, `formatPrice`, `getProductKey`, `productKeyFromUrl`, `escapeHtml`, `truncate`, `cleanProductName`, `shortDuration`, `latestChange`, `displayName`, `setThumb`, `timeAgo`, `copyToClipboard` |
 | **2b** | **Alternative matching** | `normalizeName`, `altNameTokens`, `significantTokens`, `guessBrand`, `accessoryTypes`, `accessoryConflict`, `variantSignature`, `variantsCompatible`, `matchAltCandidate`, `rankAltCandidates`, `altSearchQuery`, `altSearchUrl`, `parseJumiaSearchResults` |
 | 3 | Price + image extraction | `cleanUrl`, `absoluteImage`, `productNodesOf`, `imageFromDoc`, `extractImage`, `extractFromJsonLd`, `extractFromDomJumia`, `extractFromDomAliExpress`, `extractFromAliExpressState`, `extractFromMeta`, `extractPrice`, `extractBrand`, `detectFulfilment`, `fulfilmentInfo` |
 | 4 | Price storage | `loadHistory`, `saveHistory`, `mergeHistoryData`, `recordPrice` |
 | **4a** | **Cheaper alternatives** | `cheaperAltsEnabled`, `setCheaperAltsEnabled`, `altCheckDue`, `checkCheaperAlts`, `maybeNotifyCheaper`, `altPanelText`, `renderAltPanel`, `syncAltsToggles` |
 | **4b** | **Smart watch scheduler** | `loadWatchState`, `selectCanaries`, `watchNextDelay`, `noteLivePrice`, `smartWatchTick`, `checkWatchedProduct`, `applyWatchedPrice`, `initSmartWatch`, `renderWatchStatus` |
 | 5 | Coupons | validation sets, `normalizeCoupon`, `extractCouponsFromDom`, `mergeCoupons`, `loadCoupons`, `saveCoupons`, `purgeInvalidCoupons`, `fetchCouponPage`, `refreshCouponsFromWeb`, `scanCurrentPageForCoupons`, `parseExpiry`, `parseCouponValue`, `rankCoupons` |
-| 6 | Main panel | `createPanel`, `updateTrackedBadge`, `updatePanel`, `renderCoupons`, `initTrackButton`, `syncTrackButton` |
+| 6 | Main panel | `createPanel`, `updateTrackedBadge`, `updatePanel`, `renderCoupons`, `initTrackButton`, `initCardTrackButtons`, `initCardTrackWatching`, `cardProductInfo`, `recordCardProduct`, `syncTrackButtons` |
 | 7 | Tracked-products dashboard | `backfillImages`, `editTarget`, `openTrackedModal`, `refreshDashboardIfOpen`, `renderTrackedModal(preserve)` |
 | 8 | Notifications | `notify`, `notifyDrop` |
 | 9 | Main / bootstrap | `isProductPage`, `trackCurrentPage`, `watchSpaNavigation`, `init` |
@@ -187,6 +188,7 @@ history = {
 - `brand` (Jumia) comes from the embedded product JSON via `extractBrand`, falling back to the title, and feeds alternative matching.
 - `fulfilment` is `{ kind: 'express'|'abroad'|'local', express, abroad, checkedAt }` and is re-detected on every visit.
 - `alts` caches the alternative search: `{ checkedAt, failedAt, query, items, best, notifiedAt, notifiedUrl }`. `best` is the cheapest compatible listing or `null`.
+- A sample's `src` records where it came from: `dom`, `json-ld`, `state`, or `meta` (page visits), `watch` (background checks), or `card` (a listing-card button).
 
 ### Merge semantics
 `mergeHistoryData(incoming)`:
@@ -346,14 +348,20 @@ Returns `{ kind, express, abroad }`:
 
 Express wins when both signals appear, because the Express badge is the stronger, user-visible claim. `fulfilmentInfo(f)` converts the kind into `{ cls, text, title }` for the panel and dashboard, so the wording exists in exactly one place. AliExpress never receives these badges.
 
-### Track button (`initTrackButton`)
+### Track buttons: product page + result cards
 
-Jumia product pages only. The script locates `#wishlist` (or `a[data-track-onclick="wishlist"]`), inserts a `.jpt-add-col` column before it, moves the heart inside, and appends a `.jpt-add-track` button below. The column is a real flex column, so the button sits directly under the heart without absolute positioning.
+Jumia only. The script has two injection paths that share one state model.
 
-- `syncTrackButton()` re-reads the history and sets `.tracked`, the label (**Track price** / **Tracked — open**), and the tooltip.
-- `onAddTrackClick()` records the product when it is missing (calling `recordPrice`, `updatePanel`, `updateTrackedBadge`, and `checkCheaperAlts`), shows a panel toast when no price is available yet, then opens the dashboard.
-- `updateTrackedBadge` calls `syncTrackButton`, so deleting a product or a background record keeps the button truthful.
-- `initTrackButton` runs from `init` and from the SPA navigation watcher, and is idempotent (it re-syncs instead of injecting a second button).
+**Product page (`initTrackButton`).** Locates `#wishlist` (or `a[data-track-onclick="wishlist"]`), inserts a `.jpt-add-col` column before it, moves the heart inside, and appends a `.jpt-add-track` button below. The column is a real flex column, so the button sits directly under the heart without absolute positioning.
+
+**Listing, search, and category cards (`initCardTrackButtons`).** For every `article.prd`, wraps `.btn._wslt` in an absolutely positioned `.jpt-card-col` at the card's top-right (the `.prd` itself is already `position: relative`), resets the heart to static inside it, and appends a compact `.jpt-card-track` variant of the same button. The page's visual layout is unchanged apart from the small pill under the heart.
+
+- `productKeyFromUrl(href)` derives the same storage key from a card link that `getProductKey()` derives from the current page, so both paths write to one entry.
+- `cardProductInfo(card)` reads the name, visible GHS price, image, brand, and Express/abroad badges from the card. `recordCardProduct(card)` appends a `src: 'card'` sample, applies the same 120-sample cap, and stores `fulfilment`.
+- `setTrackBtnState` / `syncTrackButtons` re-read history for every `.jpt-add-track[data-key]` and set `.tracked`, the label (**Track price** / **Tracked — open**), and the tooltip. `updateTrackedBadge` calls `syncTrackButtons`, so deleting a product or a background record updates every visible button.
+- `onAddTrackClick` (product page) records via `recordPrice`, updates the panel, and runs `checkCheaperAlts`. `onCardTrackClick` records via `recordCardProduct` only when the key is missing, then runs `checkCheaperAlts`. Both open the dashboard; an already tracked card adds no sample.
+- A debounced `MutationObserver` (`initCardTrackWatching`, 350 ms) re-scans after infinite scroll or filtering inserts cards. Observation only starts when the page already contains `article.prd`, so home, dashboard, and product pages never pay for it.
+- Non-product pages set the panel's current line to a short “use 💰 Track on a result card” hint, and the alternatives block shows the same instead of “waiting for this page's price”.
 
 Because the heart is moved into a wrapper, the page's own wishlist click handler still receives the same element and attributes.
 
@@ -386,7 +394,7 @@ Web sync honours `CONFIG.couponCacheTTLMs` (6 hours) unless forced by **Find Cou
 - One `GM_addStyle` block; explicit colours and `color-scheme: only light`.
 - `updatePanel(result)` sets the product name (`displayName`), thumbnail (`setThumb`), current price, stats, drop message, and the `.jpt-fulfilment` pill (`fulfilmentInfo`).
 - A `.jpt-alts` block sits under the stats: a header with the on/off checkbox, and a body rendered by `altPanelText` (searching / no match / cheapest match with saving, Express marker, and check time). `renderAltPanel` rewrites it after every record, search, or toggle, and hides it on AliExpress.
-- `initTrackButton()` injects the 💰 button under the wishlist heart (see §7c).
+- `initTrackButton()` injects the 💰 button under the product-page wishlist heart, and `initCardTrackButtons()` injects the compact variant under every result card's heart (see §7c).
 - `renderCoupons()` rebuilds the coupon list from the cache on demand.
 - Buttons wire directly to `recordPrice`, `refreshCouponsFromWeb`, storage clears, and the dashboard.
 
@@ -491,6 +499,7 @@ The smart watch additionally notifies once when a price crosses below its stored
 | Change alternative matching | `matchAltCandidate`, `variantsCompatible`, `accessoryConflict`, `rankAltCandidates` + the matching tests |
 | Change alternative cadence | `CONFIG.alts` (`checkIntervalMs`, `failBackoffMs`, `notifyCooldownMs`, thresholds) |
 | Change delivery labels | `detectFulfilment` / `fulfilmentInfo` |
+| Change track-button placement | `initTrackButton` / `initCardTrackButtons` + `.jpt-add-col` / `.jpt-card-col` CSS |
 | Add import formats | `mergeHistoryData` |
 
 After any change: run `node --check`, exercise the affected flow with stubbed GM APIs, and update `CHANGELOG.md`.

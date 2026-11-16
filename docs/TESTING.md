@@ -39,7 +39,7 @@ npm install jsdom
 node tests/smartwatch.test.cjs
 ```
 
-The suite runs 25 jsdom cases with no network access. It prints `PASS`/`FAIL` per case and exits non-zero on the first failure.
+The suite runs 28 jsdom cases with no network access. It prints `PASS`/`FAIL` per case and exits non-zero on the first failure.
 
 ```js
 const fs = require('fs');
@@ -184,6 +184,11 @@ These are the assertions worth keeping when changing extraction, storage, or UI.
 - Clicking **Track price** records the product, opens `#price-tracker-modal`, and relabels the button **Tracked — open**.
 - Clicking an already tracked product does not duplicate a sample; deleting the product from the dashboard resets the label on the next `updateTrackedBadge`.
 - No button is injected on non-product pages or AliExpress.
+- Each `article.prd` on a listing page gets a `.jpt-card-col` at its top-right containing the original `.btn._wslt` heart and a `.jpt-card-track` button whose `data-key` is derived from the card URL.
+- Clicking a card button stores the card's name, price, brand, image (when present), and Express/abroad badge, appends exactly one `src: "card"` sample, and opens the dashboard.
+- A card whose product is already tracked shows **Tracked — open** on first render; clicking opens the dashboard with the sample count unchanged.
+- A dynamically appended `article.prd` (infinite scroll) receives a button after the 350 ms debounced scan.
+- Home, dashboard, and product pages create no card observer, and the panel's alternatives block shows the listing-page hint rather than "waiting for this page's price".
 
 ---
 
@@ -251,6 +256,10 @@ The UI must remain readable.
 - [ ] Untick **Smart watch**: no further scheduled requests.
 - [ ] Open a product: the panel shows **⚡ Jumia Express**, **✈ Ships from abroad**, or **🏬 Marketplace seller**; the same badge appears on its dashboard row.
 - [ ] Click **💰 Track price** under the wishlist heart: the product is added and the dashboard opens; the button now reads **Tracked — open**. Clicking the heart still triggers Jumia's wishlist flow.
+- [ ] On a Jumia search/category page, every product card shows a small **Track price** pill under its heart without shifting the card layout. Click one: the item is added from the card data, the dashboard opens, and that pill reads **Tracked — open**.
+- [ ] Click the same card again: the dashboard opens but the sample count does not grow. Reload the page: the pill is still **Tracked — open**.
+- [ ] Scroll to trigger more results (or apply a filter): new cards also get pills.
+- [ ] While on a listing page, the panel says to use 💰 Track on a result card rather than "waiting for this page's price".
 - [ ] Open a product with an obvious cheaper duplicate in the catalogue: the *Cheaper alternatives* block links the cheaper listing with its saving and an Express/abroad marker, and one notification fires at ≥3% and ≥GH₵ 1.
 - [ ] Untick **on** in the panel block (or **💸 Cheaper** in the dashboard): no new `/catalog/?q=` requests appear in DevTools, the block says it is off, and the `💸 -x%` row badges disappear or stop updating.
 - [ ] Re-tick the option: a search runs immediately and the row badge returns.

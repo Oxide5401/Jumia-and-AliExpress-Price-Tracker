@@ -175,8 +175,9 @@ ${abroad ? '<p>Shipped from abroad</p>' : ''}
 </body></html>`;
 }
 
-function searchCard({ url, name, price, brand = '', express = false, abroad = false }) {
+function searchCard({ url, name, price, brand = '', express = false, abroad = false, wishlist = false }) {
     return `<article class="prd _fb col c-prd">
+        ${wishlist ? `<a role="button" href="/customer/account/login/" class="btn _i _rnd _wslt _sec" rel="nofollow" data-track-onclick="wishlist"><svg width="24" height="24"></svg></a>` : ''}
         <a href="${url}" class="core" data-ga4-item_brand="${brand}" data-gtm-brand="${brand}">
             <div class="info">
                 <h3 class="name">${name}</h3>
@@ -1199,6 +1200,104 @@ test('the Track price button sits under wishlist and adds the product', async ()
     assert(loadJSON(env, HISTORY_KEY)[key], 'product added to the stored list');
     assert(doc.getElementById('price-tracker-modal'), 'dashboard opens after adding');
     assert(/Tracked — open/.test(doc.querySelector('.jpt-add-track').textContent), 'button reflects the tracked state');
+});
+
+// ── 25. Listing cards get their own button under the heart ─────────────
+test('a product card on a listing page gets a track button that adds it', async () => {
+    const cardUrl = 'https://www.jumia.com.gh/catalog/?q=power+bank';
+    const productUrl = '/oraimo-traveler-15-power-bank-20000mah-300000001.html';
+    const name = 'Oraimo Traveler 15 Power Bank 20000mAh 15W';
+    const env = await makeEnv({
+        url: cardUrl,
+        html: searchPage([{ url: productUrl, name, price: 150, brand: 'Oraimo', express: true, wishlist: true }]),
+        storage: { jumia_gh_coupons_last_fetch: realNow },
+        responses: () => ({ status: 200, text: searchPage([]) }),
+    });
+    await flush(10);
+
+    const doc = env.win.document;
+    const card = doc.querySelector('article.prd');
+    const col = card.querySelector('.jpt-card-col');
+    assert(col, 'card button column injected');
+    assert.strictEqual(col.querySelector('.btn._wslt').parentElement, col, 'heart moved into the card column');
+    const btn = col.querySelector('.jpt-card-track');
+    assert(btn, 'card track button injected');
+    assert.strictEqual(btn.dataset.key, 'oraimo-traveler-15-power-bank-20000mah-300000001', 'key from card URL');
+    assert(/Track price/.test(btn.textContent), 'untracked card label');
+
+    btn.click();
+    await flush(15);
+
+    const h = loadJSON(env, HISTORY_KEY);
+    const product = h['oraimo-traveler-15-power-bank-20000mah-300000001'];
+    assert(product, 'card product recorded without opening the product page');
+    assert.strictEqual(product.name, name, 'name from the card');
+    assert.strictEqual(product.samples.length, 1, 'one sample from the card');
+    assert.strictEqual(product.samples[0].src, 'card', 'sample marked as card-sourced');
+    assert.strictEqual(product.fulfilment.kind, 'express', 'Express badge read from the card');
+    assert(product.image == null || /^https?:/.test(product.image), 'image optional');
+    assert(doc.getElementById('price-tracker-modal'), 'dashboard opens after adding from a card');
+    assert(/Tracked — open/.test(doc.querySelector('.jpt-card-track').textContent), 'card label flips');
+});
+
+// ── 26. A tracked card opens the dashboard without duplicating a sample ─
+test('clicking an already tracked card opens the dashboard and adds no sample', async () => {
+    const key = 'oraimo-traveler-15-power-bank-20000mah-300000001';
+    const name = 'Oraimo Traveler 15 Power Bank 20000mAh 15W';
+    const history = {
+        [key]: {
+            name, url: 'https://www.jumia.com.gh/oraimo-traveler-15-power-bank-20000mah-300000001.html',
+            site: 'jumia', currency: 'GHS', created: realNow - DAY,
+            samples: [{ p: 150, t: realNow - HOUR }],
+        },
+    };
+    const env = await makeEnv({
+        url: 'https://www.jumia.com.gh/catalog/?q=power+bank',
+        html: searchPage([{ url: '/oraimo-traveler-15-power-bank-20000mah-300000001.html', name, price: 140, brand: 'Oraimo', wishlist: true }]),
+        storage: { ...seedHistory(history), jumia_gh_coupons_last_fetch: realNow },
+        responses: () => ({ status: 200, text: searchPage([]) }),
+    });
+    await flush(10);
+
+    const doc = env.win.document;
+    const btn = doc.querySelector('.jpt-card-track');
+    assert(btn && /Tracked — open/.test(btn.textContent), 'tracked card shows the state immediately');
+
+    btn.click();
+    await flush(10);
+
+    assert(doc.getElementById('price-tracker-modal'), 'dashboard opens');
+    assert.strictEqual(loadJSON(env, HISTORY_KEY)[key].samples.length, 1, 'no sample duplicated from the card');
+});
+
+// ── 27. Cards added by infinite scroll receive buttons too ─────────────
+test('infinite-scroll cards are picked up by the debounced rescan', async () => {
+    const env = await makeEnv({
+        url: 'https://www.jumia.com.gh/catalog/?q=power+bank',
+        html: searchPage([{
+            url: '/first-product-300000001.html', name: 'First Product 128GB',
+            price: 100, brand: 'Acme', wishlist: true,
+        }]),
+        storage: { jumia_gh_coupons_last_fetch: realNow },
+        responses: () => ({ status: 200, text: searchPage([]) }),
+    });
+    await flush(5);
+
+    const doc = env.win.document;
+    const catalog = doc.querySelector('[data-catalog="true"]');
+    catalog.insertAdjacentHTML('beforeend', searchCard({
+        url: '/second-product-300000002.html', name: 'Second Product 256GB',
+        price: 80, brand: 'Acme', wishlist: true,
+    }));
+    await flush(5);
+    assert(env.timers.some(t => /initCardTrackButtons/.test(t.src)), 'a debounced rescan is queued');
+
+    await runDue(env, 500);
+    const cards = doc.querySelectorAll('article.prd');
+    assert.strictEqual(cards.length, 2, 'two cards present');
+    assert(cards[1].querySelector('.jpt-card-track'), 'the appended card gets a button');
+    assert.strictEqual(cards[1].querySelector('.jpt-card-track').dataset.key, 'second-product-300000002',
+        'its key comes from its own URL');
 });
 
 (async () => {

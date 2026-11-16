@@ -2,6 +2,20 @@
 
 All notable changes to this project are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions use `MAJOR.MINOR.PATCH`.
 
+## [3.11.1] — 2026-11-16
+
+### Added
+- **One-click tracking from result cards.** Every product card on Jumia listing/search/category pages gets a compact **Track price** button directly under its wishlist heart. Clicking it records that card's name, price, image, brand, and Express/abroad badge without opening the product, then opens the dashboard. Tracked cards read **Tracked — open** and simply open the dashboard; no duplicate sample is added.
+- **Lazy-loaded results are covered.** A debounced `MutationObserver` re-scans the page when infinite scroll or a filter inserts more cards, so new results get buttons too.
+- **Panel hint on listing pages.** The panel now says *Use 💰 Track price on a result card, or open a product*, and the alternatives block explains the same instead of waiting for a product price.
+
+### Changed
+- Track buttons are now keyed by the product in their own card (`data-key`), and `syncTrackButtons()` refreshes every injected button from storage after any record, delete, or background update.
+- Product keys can be derived from any URL (`productKeyFromUrl`), so listing-card links and the current page share one identity scheme.
+
+### Tests
+- Three new jsdom cases (28 total): adding from a listing card stores a `src: "card"` sample with the card's fulfilment, clicking an already tracked card opens the dashboard without duplicating a sample, and an infinite-scroll card receives a button after the debounced rescan.
+
 ## [3.11.0] — 2026-11-16
 
 ### Added
