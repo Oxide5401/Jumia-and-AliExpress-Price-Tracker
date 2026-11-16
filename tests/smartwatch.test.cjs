@@ -11,6 +11,7 @@ const SCRIPT = fs.readFileSync(
 const HISTORY_KEY = 'jumia_gh_price_history';
 const WATCH_KEY = 'jumia_gh_smart_watch';
 const STATE_KEY = 'jumia_gh_smart_watch_state';
+const ALTS_KEY = 'jumia_gh_cheaper_alts';
 const DAY = 24 * 60 * 60 * 1000;
 const HOUR = 60 * 60 * 1000;
 
@@ -151,6 +152,44 @@ function page(price, name = 'Test Product', url = '') {
         url,
         offers: { '@type': 'Offer', price: String(price), priceCurrency: 'GHS', availability: 'InStock' },
     })}</script></head><body></body></html>`;
+}
+
+/** Jumia PDP with its embedded product JSON (brand, Express flag). */
+function pdp(price, name, { brand = '', express = false, abroad = false, wishlist = false } = {}) {
+    const product = {
+        id: 'P1', displayName: name, name, brand,
+        ...(express ? { isShopExpress: true } : {}),
+        prices: { price: `GH₵ ${price}`, rawPrice: String(price) },
+    };
+    return `<!doctype html><html><head><title>${name}</title>
+<script type="application/ld+json">${JSON.stringify({
+        '@context': 'https://schema.org',
+        '@type': 'Product',
+        name,
+        offers: { '@type': 'Offer', price: String(price), priceCurrency: 'GHS', availability: 'InStock' },
+    })}</script></head><body>
+<script>window.__JUMIA__ = {"products":[${JSON.stringify(product)}]};</script>
+${wishlist ? '<div class="-df -j-bet"><div><h1>Product</h1></div><a id="wishlist" href="/login/" class="btn _def">♥</a></div>' : ''}
+${express ? '<section class="card"><h2>Delivery &amp; Returns</h2><h3><title>Jumia Express</title></h3></section>' : ''}
+${abroad ? '<p>Shipped from abroad</p>' : ''}
+</body></html>`;
+}
+
+function searchCard({ url, name, price, brand = '', express = false, abroad = false }) {
+    return `<article class="prd _fb col c-prd">
+        <a href="${url}" class="core" data-ga4-item_brand="${brand}" data-gtm-brand="${brand}">
+            <div class="info">
+                <h3 class="name">${name}</h3>
+                <div class="prc _inl">GH₵ ${price}</div>
+            </div>
+        </a>
+        <div class="crd-btm"><div class="tgs">${express ? '<span class="bdg _xprs">Jumia Express</span>' : ''}</div></div>
+        ${abroad ? '<div>Shipped from abroad</div>' : ''}
+    </article>`;
+}
+
+function searchPage(cards) {
+    return `<!doctype html><html><body><div data-catalog="true">${cards.map(searchCard).join('')}</div></body></html>`;
 }
 
 async function openDashboard(env) {
@@ -957,6 +996,209 @@ test('ranking prefers relevant usable codes and purges junk on startup', async (
     assert.strictEqual(rendered.at(-1), 'OLD99', 'expired coupon last');
     assert(!rendered.includes('2024'), 'invalid stored code not rendered');
     assert(!loadCoupons(env).some(c => c.code === '2024'), 'invalid stored code purged');
+});
+
+// ── 20. Cheaper alternatives: conservative matching + Express badge ────
+test('finds a cheaper same-product listing and rejects accessories, wrong capacity and other brands', async () => {
+    const url = 'https://www.jumia.com.gh/current-product.html';
+    const name = 'Oraimo Traveler 15 Power Bank 20000mAh 15W Type-C Fast Charging with LED Torch';
+    const search = searchPage([
+        {
+            url: '/oraimo-traveler-15-power-bank-20000mah-black-300000001.html',
+            name: 'Oraimo Traveler 15 Power Bank 20000mAh 15W Type-C Fast Charging with LED Torch - Black',
+            price: 150, brand: 'Oraimo', express: true,
+        },
+        {
+            url: '/oraimo-traveler-15-power-bank-case-cover-300000002.html',
+            name: 'Oraimo Traveler 15 Power Bank Case Cover 20000mAh',
+            price: 20, brand: 'Oraimo',
+        },
+        {
+            url: '/oraimo-traveler-15-power-bank-10000mah-300000003.html',
+            name: 'Oraimo Traveler 15 Power Bank 10000mAh 15W Type-C',
+            price: 90, brand: 'Oraimo',
+        },
+        {
+            url: '/anker-power-bank-20000mah-300000004.html',
+            name: 'Anker Power Bank 20000mAh 15W Type-C Fast Charging',
+            price: 80, brand: 'Anker',
+        },
+        {
+            url: '/oraimo-15w-fast-charger-300000005.html',
+            name: 'Oraimo 15W Fast Charger Type-C',
+            price: 30, brand: 'Oraimo',
+        },
+        {
+            url: '/oraimo-traveler-15-power-bank-20000mah-300000006.html',
+            name: 'Oraimo Traveler 15 Power Bank 20000mAh 15W Type-C',
+            price: 210, brand: 'Oraimo',
+        },
+        {
+            url: '/oraimo-phone-case-300000007.html',
+            name: 'Oraimo Phone Case Cover',
+            price: 10, brand: 'Oraimo',
+        },
+        {
+            url: '/oraimo-traveler-15-power-bank-20-000mah-black-300000008.html',
+            name: 'Oraimo Traveler 15 Power Bank 20,000mAh 15W Type-C Fast Charging - Black',
+            price: 140, brand: 'Oraimo',
+        },
+    ]);
+
+    const env = await makeEnv({
+        url,
+        html: pdp(200, name, { brand: 'Oraimo', express: true }),
+        storage: { jumia_gh_coupons_last_fetch: realNow },
+        responses: u => u.includes('/catalog/?q=')
+            ? { status: 200, text: search }
+            : { status: 200, text: pdp(200, name, { brand: 'Oraimo', express: true }) },
+    });
+    await runDue(env, 2000);
+    await flush(20);
+
+    const h = loadJSON(env, HISTORY_KEY);
+    const product = Object.values(h)[0];
+    assert(product.alts, 'alt state stored');
+    assert(product.alts.best, 'a best match stored');
+    assert.strictEqual(product.alts.best.price, 140, 'cheapest compatible listing wins');
+    assert(/300000008/.test(product.alts.best.url), 'right product chosen (comma-separated capacity)');
+    assert.strictEqual(product.alts.best.express, false, 'non-Express alternative is honest');
+    assert.strictEqual(product.alts.items.find(i => /300000001/.test(i.url)).express, true,
+        'Express flag carried through for the Express alternative');
+    assert(product.alts.checkedAt, 'check timestamp stored');
+    assert(!product.alts.items.some(i => /case-cover|10000mah|anker|charger|phone-case/.test(i.url)),
+        'accessory, capacity mismatch, other brand and charger rejected');
+
+    const panel = env.win.document.getElementById('price-tracker-panel');
+    assert(/⚡ Jumia Express/.test(panel.querySelector('.jpt-fulfilment').textContent), 'PDP shows Express');
+    const altsText = panel.querySelector('.jpt-alts-body').textContent;
+    assert(/140\.00/.test(altsText), 'panel shows the cheaper price');
+    assert(/−30%/.test(altsText), 'panel shows the saving');
+    assert(env.requests.some(r => /\/catalog\/\?q=/.test(r.url)), 'one catalog search made');
+
+    assert.strictEqual(env.win.__notifications.length, 1, 'one cheaper-alternative notification');
+    assert(/Cheaper alternative/.test(env.win.__notifications[0].title), 'notification title');
+    assert(/Save GH₵ 60\.00 \(30%\)/.test(env.win.__notifications[0].text), 'notification text has the saving');
+});
+
+// ── 21. The feature is opt-out and the toggle takes effect immediately ─
+test('cheaper alternatives can be turned off and on from the dashboard', async () => {
+    const url = 'https://www.jumia.com.gh/current-product.html';
+    const name = 'Oraimo Traveler 15 Power Bank 20000mAh 15W Type-C';
+    const search = searchPage([{
+        url: '/oraimo-traveler-15-power-bank-20000mah-300000001.html',
+        name, price: 120, brand: 'Oraimo', express: true,
+    }]);
+    const env = await makeEnv({
+        url,
+        html: pdp(200, name, { brand: 'Oraimo' }),
+        storage: { jumia_gh_coupons_last_fetch: realNow, [ALTS_KEY]: false },
+        responses: u => u.includes('/catalog/?q=')
+            ? { status: 200, text: search }
+            : { status: 200, text: pdp(200, name, { brand: 'Oraimo' }) },
+    });
+    await runDue(env, 2000);
+    await flush(10);
+
+    assert.strictEqual(env.requests.filter(r => /\/catalog\/\?q=/.test(r.url)).length, 0,
+        'no search while the feature is off');
+    assert(/Off — turn on/.test(env.win.document.querySelector('.jpt-alts-body').textContent),
+        'panel explains that the feature is off');
+
+    await openDashboard(env);
+    const cb = env.win.document.querySelector('.jtm-alts-cb');
+    assert(cb && !cb.checked, 'dashboard checkbox starts off');
+    cb.checked = true;
+    cb.dispatchEvent(new env.win.Event('change'));
+    await flush(20);
+
+    assert.strictEqual(env.store.get(ALTS_KEY), true, 'choice stored');
+    assert(env.requests.filter(r => /\/catalog\/\?q=/.test(r.url)).length >= 1, 'turning it on starts a search');
+    assert(env.win.document.querySelector('.jtm-flag.alt'), 'dashboard now shows the cheaper badge');
+});
+
+// ── 22. One cheaper-alternative notification per product per day ───────
+test('cheaper-alternative notification respects the 24h cooldown', async () => {
+    const key = 'p1';
+    const url = 'https://www.jumia.com.gh/p1.html';
+    const name = 'Oraimo Traveler 15 Power Bank 20000mAh 15W Type-C';
+    const history = {
+        [key]: {
+            name, url, site: 'jumia', currency: 'GHS', brand: 'Oraimo',
+            samples: [{ p: 200, t: realNow - HOUR }], created: realNow - 9 * DAY,
+            alts: {
+                checkedAt: realNow - 13 * HOUR,
+                notifiedAt: realNow - HOUR,
+                notifiedUrl: 'https://www.jumia.com.gh/oraimo-traveler-15-power-bank-20000mah-300000001.html',
+                best: {
+                    url: 'https://www.jumia.com.gh/oraimo-traveler-15-power-bank-20000mah-300000001.html',
+                    name, price: 120, brand: 'Oraimo', express: true,
+                },
+            },
+        },
+    };
+    const search = searchPage([{
+        url: '/oraimo-traveler-15-power-bank-20000mah-300000001.html',
+        name, price: 120, brand: 'Oraimo', express: true,
+    }]);
+    const env = await makeEnv({
+        url,
+        html: pdp(200, name, { brand: 'Oraimo' }),
+        storage: { ...seedHistory(history), jumia_gh_coupons_last_fetch: realNow },
+        responses: u => u.includes('/catalog/?q=')
+            ? { status: 200, text: search }
+            : { status: 200, text: pdp(200, name, { brand: 'Oraimo' }) },
+    });
+    await runDue(env, 2000);
+    await flush(20);
+
+    assert(env.requests.some(r => /\/catalog\/\?q=/.test(r.url)), 'stale check still runs');
+    assert.strictEqual(env.win.__notifications.length, 0, 'no repeat notification within 24h');
+});
+
+// ── 23. Fulfilment: abroad listings are labelled honestly ──────────────
+test('a non-Express listing shipped from abroad is labelled as abroad', async () => {
+    const url = 'https://www.jumia.com.gh/imported-gadget.html';
+    const name = 'Imported Kitchen Gadget 500W';
+    const env = await makeEnv({
+        url,
+        html: pdp(300, name, { brand: 'Acme', abroad: true }),
+        storage: { jumia_gh_coupons_last_fetch: realNow },
+    });
+    await runDue(env, 2000);
+
+    const product = Object.values(loadJSON(env, HISTORY_KEY))[0];
+    assert.strictEqual(product.fulfilment.kind, 'abroad', 'abroad detected');
+    assert(/✈ Ships from abroad/.test(env.win.document.querySelector('.jpt-fulfilment').textContent),
+        'panel shows the abroad badge');
+});
+
+// ── 24. One-click Track price button under the wishlist heart ──────────
+test('the Track price button sits under wishlist and adds the product', async () => {
+    const url = 'https://www.jumia.com.gh/track-me.html';
+    const name = 'One Tap Product 128GB';
+    const env = await makeEnv({
+        url,
+        html: pdp(99, name, { brand: 'Acme', wishlist: true }),
+        storage: { jumia_gh_coupons_last_fetch: realNow },
+    });
+    await flush();
+
+    const doc = env.win.document;
+    const btn = doc.querySelector('.jpt-add-track');
+    assert(btn, 'track button injected');
+    const col = btn.parentElement;
+    assert(col.classList.contains('jpt-add-col'), 'button in the wishlist column');
+    assert.strictEqual(col.querySelector('#wishlist').parentElement, col, 'wishlist moved into the column');
+    assert(/Track price/.test(btn.textContent), 'initial label');
+
+    btn.click();
+    await flush(10);
+
+    const key = 'track-me';
+    assert(loadJSON(env, HISTORY_KEY)[key], 'product added to the stored list');
+    assert(doc.getElementById('price-tracker-modal'), 'dashboard opens after adding');
+    assert(/Tracked — open/.test(doc.querySelector('.jpt-add-track').textContent), 'button reflects the tracked state');
 });
 
 (async () => {

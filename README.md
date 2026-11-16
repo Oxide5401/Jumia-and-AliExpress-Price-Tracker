@@ -2,7 +2,7 @@
 
 A single Tampermonkey/Violentmonkey userscript that tracks product prices on **Jumia Ghana** (`jumia.com.gh`) and **AliExpress** (Ghana shipping, GHS), finds and stores coupon codes, and shows everything in one dashboard — including **product thumbnails**.
 
-![Version](https://img.shields.io/badge/version-3.10.3-orange)
+![Version](https://img.shields.io/badge/version-3.11.0-orange)
 ![License](https://img.shields.io/badge/license-MIT-blue)
 ![Platform](https://img.shields.io/badge/platform-Tampermonkey%20%7C%20Violentmonkey-2ea44f)
 
@@ -21,6 +21,7 @@ A single Tampermonkey/Violentmonkey userscript that tracks product prices on **J
 - [Upgrading / keeping your data](#upgrading--keeping-your-data)
 - [Usage](#usage)
   - [The floating panel](#the-floating-panel)
+  - [Cheaper alternatives & delivery badges](#cheaper-alternatives--delivery-badges)
   - [Coupons](#coupons)
   - [The tracked-products dashboard](#the-tracked-products-dashboard)
   - [Product images](#product-images)
@@ -69,6 +70,15 @@ A single Tampermonkey/Violentmonkey userscript that tracks product prices on **J
 - Low/high/change stats restart from the first sample after the swap, while the old samples stay in the history.
 - **📈 Price history** on any dashboard row opens a per-product view with a chart of every sample and a newest-first list of every price change, including listing-change markers.
 
+### Cheaper alternatives & delivery badges (new in 3.11.0)
+- **Finds the same product listed cheaper.** On a Jumia product page the script searches the Jumia catalogue once, matches titles conservatively, and links the cheapest compatible listing.
+- **Safe matching.** Brand, model words, capacity/unit values (`20000mAh`, `128GB`, `5L`), and accessory words (`case`, `cover`, `charger`, `protector`, `strap`…) are compared, so a phone case is not offered as a cheaper phone and a 10,000 mAh bank is not compared with a 20,000 mAh one.
+- **Opt-out, not forced.** Turn **💸 Cheaper alternatives** on or off from either the panel or the dashboard. It is **on by default**.
+- **Sensible notifications.** A notification fires only when the match is at least **3% and GH₵ 1 cheaper**, and at most once per product per **24 hours**.
+- **Delivery badges.** Jumia products show **⚡ Jumia Express**, **✈ Ships from abroad** (when the page says so), or **🏬 Marketplace seller** in the panel and dashboard.
+- **One-click add.** A **💰 Track price** button appears directly under the Jumia wishlist heart and opens the dashboard with the product added.
+- Checks are throttled to **once per product every 12 hours**; AliExpress is not searched.
+
 ### Smart watch (new in 3.5.0, off by default)
 - Optional background price checks while a Jumia or AliExpress tab is open — no server, no always-on background page.
 - **Canary-gated:** a few volatile products act as signals; the rest are checked only when there is evidence a price may have moved.
@@ -95,6 +105,7 @@ A single Tampermonkey/Violentmonkey userscript that tracks product prices on **J
 - Search by name; sort by recent changes, recent, biggest drop/rise, lowest/highest price, or name. Your last sort choice is remembered the next time you open the dashboard.
 - Per-row current / low / high / change, a target button, a price-history button, and a delete button.
 - `↓` / `↑` badges and a soft tint mark products that moved within the last 7 days; a `⚠ listing` badge marks likely seller edits.
+- A `💸 -x%` badge opens the cheaper matching listing; `⚡ Express` / `✈ Abroad` / `🏬 Marketplace` badges show how each Jumia item ships.
 - **📈 Price history** per row: a chart of every sample plus a newest-first list of all price changes.
 - **Export JSON**, merge-safe **Import JSON**, **Fetch images**, and **Clear All**.
 - Works on any page of either site — you do not need to be on a product page.
@@ -178,6 +189,8 @@ Your data is still attached to the original script. Rescue it like this:
 | Product block | Thumbnail plus the product name of the page you are on. |
 | Current | Current price and, when available, the pre-discount price. |
 | Stats | Sample count, change since the first sample, and drop alerts. |
+| Delivery badge | `⚡ Jumia Express`, `✈ Ships from abroad`, or `🏬 Marketplace seller` for Jumia listings. |
+| Cheaper alternatives | The cheapest similar Jumia listing, its saving, an Express/abroad marker, and an **on/off** checkbox. |
 | Listing warning | `⚠ Listing changed` appears for 30 days after a seller edit is detected, replacing any fake drop alert. |
 | **Refresh** | Re-extracts the price now and records a sample. |
 | **Find Coupons** | Scans this page and the site's coupon pages immediately. |
@@ -186,6 +199,22 @@ Your data is still attached to the original script. Rescue it like this:
 | Title bar | Drag to move the panel anywhere; double-click it to snap back to the bottom-right corner. The position is remembered across reloads. |
 
 Prices are recorded automatically shortly after a product page loads. If extraction fails, the script retries with a site-specific backoff (20 attempts on Jumia, 40 on AliExpress).
+
+On Jumia product pages, a **💰 Track price** button is inserted directly under the wishlist heart. Click it to add the product (if it was not recorded yet) and open the dashboard.
+
+### Cheaper alternatives & delivery badges
+
+Jumia often lists the same item under several titles and prices. When you open a Jumia product page, the script:
+
+1. Takes the product name and searches `jumia.com.gh/catalog/?q=…` once.
+2. Parses the visible GHS prices from the result cards — never the EUR `data-gtm-price` values.
+3. Keeps only listings that look like the same product: shared brand/model words, matching capacity (`20000mAh`, `128GB`, `5L`), and no accessory mismatch (`case`, `cover`, `charger`, `protector`, `strap`…).
+4. Shows the cheapest match in the panel with its saving and an `⚡ Express` / `✈ Abroad` marker.
+5. Sends one notification when the match is at least **3% and GH₵ 1 cheaper**.
+
+The search runs at most once per product every **12 hours**. Turn the feature off with the **on** checkbox in the panel's *Cheaper alternatives* block or the **💸 Cheaper** checkbox in the dashboard bar. The setting applies immediately and is remembered.
+
+Delivery badges are read from the product page: **⚡ Jumia Express** when Jumia marks the listing as Express, **✈ Ships from abroad** when the page says it ships from abroad, otherwise **🏬 Marketplace seller**. AliExpress pages do not get these badges.
 
 ### Coupons
 
@@ -213,7 +242,7 @@ Open it with the 📊 button in the panel.
 - **Change highlight** — a `↓` / `↑` badge and soft row tint mark movement within the last 7 days. The badge tooltip shows the old and new price.
 - **Listing changes** — a `⚠ listing` badge and amber tint mean the product name or URL changed at the same time as an implausible jump. Stats restart after the swap, so a seller edit never looks like a 99% discount.
 - **Price history** — the 📈 button opens a chart of every sample plus all price changes, newest first, with listing-change steps marked. Use it to inspect a product's full timeline; Back or Escape returns to the list.
-- **Smart watch bar** — enable/disable background checks, see today's budget and next check, or run one check immediately.
+- **Smart watch bar** — enable/disable background checks, see today's budget and next check, run one check immediately, and toggle **💸 Cheaper** alternatives.
 - **Export JSON** — copies the full history to the clipboard as pretty-printed JSON.
 - **Import JSON** — paste an export; **Merge** adds new products/samples and fills missing fields without deleting anything.
 - **Fetch images** — see below.
@@ -273,6 +302,8 @@ The watch stores no data anywhere except your userscript manager's storage. It d
 
 When a new sample is at least **5% lower** than the previous one, the script triggers a notification with the new price, the previous price, and the drop percentage. It uses `GM_notification` when available and falls back to the Web Notifications API. Permission may be requested the first time.
 
+A separate **cheaper alternative** notification fires when a same-product Jumia match is at least **3% and GH₵ 1 cheaper**. It includes the current price, the match, its price, and the saving, and is limited to once per product per **24 hours**. Turn it off with the **💸 Cheaper alternatives** toggle.
+
 ---
 
 ## How prices are extracted
@@ -315,6 +346,7 @@ All data stays in your browser, inside your userscript manager's storage. There 
 | `aliexpress_coupons_show_all` | AliExpress | Whether the coupon list shows all codes. |
 | `jumia_gh_smart_watch` | both sites | Whether the opt-in smart watch is enabled (`true`/`false`). |
 | `jumia_gh_smart_watch_state` | both sites | Scheduler state: per-product due dates, validators, canary signals, budget, host backoff (JSON). |
+| `jumia_gh_cheaper_alts` | Jumia | Whether the cheaper-alternative finder is enabled (`true` by default; `false` when turned off). |
 | `jumia_gh_dash_window` | both sites | Dashboard window position, size, maximized state, and snap preference (JSON). |
 | `jumia_gh_dash_sort` | both sites | Last dashboard sort choice (`recent`, `changed`, `change-down`, `change-up`, `price-low`, `price-high`, `name`). |
 | `jumia_gh_panel_pos` | both sites | Floating panel position (`{ x, y }`), set once the panel has been dragged. |
@@ -329,6 +361,18 @@ All data stays in your browser, inside your userscript manager's storage. There 
     "site": "jumia",
     "currency": "GHS",
     "image": "https://gh.jumia.is/.../1.jpg",
+    "brand": "Samsung",
+    "fulfilment": { "kind": "express", "express": true, "abroad": false, "checkedAt": 1730200000000 },
+    "alts": {
+      "checkedAt": 1730200000000,
+      "best": {
+        "url": "https://www.jumia.com.gh/other-seller-a15.html",
+        "name": "Samsung Galaxy A15 128GB",
+        "price": 1180,
+        "express": true,
+        "abroad": false
+      }
+    },
     "target": 1299,
     "created": 1730000000000,
     "listingChangedAt": 1730200000000,
@@ -358,6 +402,9 @@ All data stays in your browser, inside your userscript manager's storage. There 
 - `lc` — optional listing-change marker (`name`, `url`, or `price`) when a seller edit made the previous price incomparable.
 - `listingChangedAt` — optional timestamp of the most recent detected seller edit; stats and the panel warning use it.
 - `image` — optional absolute image URL.
+- `brand` — optional Jumia brand used for conservative alternative matching.
+- `fulfilment` — optional Jumia delivery type: `kind` is `express`, `abroad`, or `local`; `checkedAt` is when it was read.
+- `alts` — optional cheaper-alternative cache: `checkedAt`, up to six `items`, and the cheapest compatible `best` (or `null`).
 - `target` — optional target price in the product's currency.
 
 Product keys:
@@ -391,7 +438,7 @@ Product keys:
 
 The script performs network requests only to:
 
-- `jumia.com.gh` / `www.jumia.com.gh` — coupon pages, image backfill, and optional smart-watch product checks.
+- `jumia.com.gh` / `www.jumia.com.gh` — coupon pages, image backfill, optional smart-watch product checks, and the cheaper-alternative catalogue search.
 - `aliexpress.com` / `*.aliexpress.com` — coupon pages and image backfill.
 - Product image CDNs referenced by page metadata, when the browser renders a thumbnail.
 
@@ -408,6 +455,8 @@ Requests are restricted by the script's `@connect` rules. Cookies for the curren
 - **AliExpress blocking.** Background checks are skipped for AliExpress because it serves challenge pages to scripted requests; coupon sync and image backfill can fail there too. Live capture from pages you actually open still works.
 - **Currency follows the site.** Formatting is GHS-oriented but prints whatever currency the page/extractor reports; it does not convert between currencies.
 - **Coupon discovery is heuristic.** Login-gated, personalised, or image-only offers may be missed; stale codes may persist until they expire or you clear the cache.
+- **Alternative matching is conservative, not perfect.** Titles that omit the brand/model or list a bundle may be missed on purpose; the finder never searches AliExpress and never compares different capacities.
+- **Delivery labels are page-derived.** Jumia does not expose a public "ships from abroad" flag on every listing; when the page is silent the item is labelled *Marketplace seller* rather than guessed.
 - **Dashboard size.** Product rows are sorted and filtered client-side; extremely large histories remain usable but longer to render.
 - **No cross-device sync.** Two browsers/userscript profiles have independent stores. Use Export/Import JSON to move data manually.
 
@@ -463,7 +512,7 @@ Check the version shown in your userscript manager. Some managers require a manu
 │   ├── ARCHITECTURE.md                       # module map, data flow, extension points
 │   └── TESTING.md                            # manual + automated test checklist
 ├── tests/
-│   └── smartwatch.test.cjs                   # jsdom regression tests for the scheduler
+│   └── smartwatch.test.cjs                   # jsdom tests: scheduler, alternatives, UI
 ├── LICENSE                                   # MIT
 └── .gitignore
 ```
@@ -500,7 +549,7 @@ npm install jsdom
 node tests/smartwatch.test.cjs
 ```
 
-Smart-watch tests should cover: `304` handling, the daily budget cap, canary campaign detection, target prioritisation, AliExpress skipping, visit-side metadata updates, target merging, open-dashboard refresh with change badges, dashboard window geometry (drag, snap, maximize, minimize, persistence), panel dragging/persistence, dashboard sort persistence, listing-change detection (visit + redirected background fetch), the per-product history view, and coupon extraction/ranking/sync failure. A headless Chromium screenshot is useful for layout checks:
+Smart-watch tests should cover: `304` handling, the daily budget cap, canary campaign detection, target prioritisation, AliExpress skipping, visit-side metadata updates, target merging, open-dashboard refresh with change badges, dashboard window geometry (drag, snap, maximize, minimize, persistence), panel dragging/persistence, dashboard sort persistence, listing-change detection (visit + redirected background fetch), the per-product history view, coupon extraction/ranking/sync failure, alternative matching with accessory/capacity/brand rejection, the cheaper-alternative opt-out and notification cooldown, delivery-badge detection, and the Track price button. A headless Chromium screenshot is useful for layout checks:
 
 ```bash
 msedge --headless=new --disable-gpu --hide-scrollbars \
@@ -533,7 +582,7 @@ The project follows a pragmatic `MAJOR.MINOR.PATCH` scheme:
 - **MINOR** — new sites, major features, new dashboard capabilities.
 - **PATCH** — bug fixes, selector updates, styling and documentation fixes.
 
-Current release: **3.10.3** — the dashboard remembers your sort choice, so opening it later shows the same ordering you picked. See [`CHANGELOG.md`](CHANGELOG.md).
+Current release: **3.11.0** — cheaper-alternative matching, Jumia Express/abroad delivery badges, and a one-click **Track price** button under the wishlist heart. See [`CHANGELOG.md`](CHANGELOG.md).
 
 ---
 

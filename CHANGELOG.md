@@ -2,6 +2,24 @@
 
 All notable changes to this project are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions use `MAJOR.MINOR.PATCH`.
 
+## [3.11.0] — 2026-11-16
+
+### Added
+- **Cheaper-alternative finder.** Opening a Jumia product page runs one catalogue search (`/catalog/?q=…`) and links the cheapest listing that is genuinely the same product. Matching is deliberately conservative: brand, model words, capacity/unit values (`20000mAh`, `128GB`, `5L`, `15W`), and accessory words (`case`, `cover`, `charger`, `protector`, `strap`…) are compared, so a phone case is never offered as a cheaper phone and a 10,000 mAh bank is never compared with a 20,000 mAh one.
+- **Opt-out toggle, on by default.** A *Cheaper alternatives* checkbox in the panel and a **💸 Cheaper** checkbox in the dashboard bar turn the feature off; the choice is stored in `jumia_gh_cheaper_alts` and applied immediately. Checks are throttled to once per product per 12 hours, with a one-hour retry after a failed search.
+- **Saving notifications.** One notification per product per 24 hours when the match is at least **3% and GH₵ 1 cheaper**, naming the current price, the alternative, and the saving.
+- **Delivery badges.** Jumia products show **⚡ Jumia Express**, **✈ Ships from abroad**, or **🏬 Marketplace seller** in the panel and on every dashboard row, read from `"isShopExpress"`, `.bdg._xprs`/`.bdg._glb`, the delivery card, and explicit page wording.
+- **💰 Track price button.** A button is inserted directly under the wishlist heart on Jumia product pages. One click records the product if it is not tracked yet and opens the dashboard; it then reads **Tracked — open**.
+- **Brand capture.** `recordPrice` stores the Jumia brand from the embedded product JSON (falling back to the title) for use by the matcher.
+
+### Changed
+- `mergeHistoryData` preserves `brand`, `fulfilment`, and `alts` when importing, so a merge cannot erase alternative results.
+- The dashboard watch bar now holds two toggles (Smart watch, 💸 Cheaper) plus the existing status text and **Check now** button.
+- Search-result prices are read from the visible `.prc` text in GHS; the EUR `data-gtm-price`/`data-ga4-price` attributes are ignored.
+
+### Tests
+- Five new jsdom cases (25 total): conservative alternative matching with accessory/capacity/brand rejection, immediate effect of the opt-out toggle, the 24-hour notification cooldown, abroad detection for non-Express listings, and the Track price button's placement and behaviour.
+
 ## [3.10.3] — 2026-11-15
 
 ### Added

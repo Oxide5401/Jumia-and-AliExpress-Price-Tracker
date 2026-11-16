@@ -39,6 +39,8 @@ npm install jsdom
 node tests/smartwatch.test.cjs
 ```
 
+The suite runs 25 jsdom cases with no network access. It prints `PASS`/`FAIL` per case and exits non-zero on the first failure.
+
 ```js
 const fs = require('fs');
 const { JSDOM } = require('jsdom');
@@ -162,6 +164,27 @@ These are the assertions worth keeping when changing extraction, storage, or UI.
 - **Open dashboard refresh:** a change found by a background tick re-renders an open dashboard in place, moves the product to the top under **Recent**, adds the change badge, and preserves the current search text, sort choice, and scroll position. Dispatching `visibilitychange` after another tab writes a new sample produces the same refresh.
 - **Politeness:** no more than one request is in flight, `minGapMs` is respected, and 403/429 responses set `hosts[host].blockedUntil`.
 
+### Cheaper alternatives
+- One search to `/catalog/?q=…` runs on a Jumia product page, and the cheapest compatible listing is stored as `alts.best` with `checkedAt`.
+- A same-name variant with a different capacity (`10000mAh` vs `20000mAh`), a case/cover/charger/protector, and a different brand are all rejected even when they are cheaper.
+- Search prices come from the visible `.prc` GHS text, not `data-gtm-price`/`data-ga4-price`.
+- The panel `.jpt-alts-body` shows the alternative price, the saving percentage, and an `⚡ Express` marker when the match is Express.
+- One notification fires with "Cheaper alternative" and the saving; the 24-hour `notifiedAt` cooldown suppresses a repeat.
+- With `jumia_gh_cheaper_alts: false`, no catalogue request is made, the panel says the feature is off, and unticking/ticking the dashboard `.jtm-alts-cb` takes effect immediately (one search, then a `💸 -x%` row badge).
+- A failed search sets `failedAt`, keeps any previous `best`, and suppresses retries for an hour.
+
+### Delivery badges
+- `isShopExpress: true`, `.bdg._xprs`, or a *Delivery & Returns* card containing *Jumia Express* yields `kind: 'express'` and **⚡ Jumia Express**.
+- Explicit "Shipped from abroad" text yields `kind: 'abroad'` and **✈ Ships from abroad**.
+- A page with neither signal yields `kind: 'local'` and **🏬 Marketplace seller** (never abroad).
+- Express wins when both signals are present; AliExpress products get no badge.
+
+### Track button
+- With `#wishlist` present, `.jpt-add-col` wraps the heart and `.jpt-add-track` sits below it in the same column.
+- Clicking **Track price** records the product, opens `#price-tracker-modal`, and relabels the button **Tracked — open**.
+- Clicking an already tracked product does not duplicate a sample; deleting the product from the dashboard resets the label on the next `updateTrackedBadge`.
+- No button is injected on non-product pages or AliExpress.
+
 ---
 
 ## 4. Headless render check
@@ -182,6 +205,7 @@ Look for:
 - footer buttons readable,
 - price columns aligned,
 - change badge does not push the name into an unreadable wrap,
+- delivery and 💸 badges leave the product name readable on one line,
 - no horizontal overflow at 720 px modal width.
 
 To test dark mode and anchor-hostile environments, inject this before the script:
@@ -225,6 +249,13 @@ The UI must remain readable.
 - [ ] Reload after a background check: the new sample survives and shows `src: "watch"` in Export JSON.
 - [ ] Leave the tab hidden: no new requests. Return to the tab: checks resume.
 - [ ] Untick **Smart watch**: no further scheduled requests.
+- [ ] Open a product: the panel shows **⚡ Jumia Express**, **✈ Ships from abroad**, or **🏬 Marketplace seller**; the same badge appears on its dashboard row.
+- [ ] Click **💰 Track price** under the wishlist heart: the product is added and the dashboard opens; the button now reads **Tracked — open**. Clicking the heart still triggers Jumia's wishlist flow.
+- [ ] Open a product with an obvious cheaper duplicate in the catalogue: the *Cheaper alternatives* block links the cheaper listing with its saving and an Express/abroad marker, and one notification fires at ≥3% and ≥GH₵ 1.
+- [ ] Untick **on** in the panel block (or **💸 Cheaper** in the dashboard): no new `/catalog/?q=` requests appear in DevTools, the block says it is off, and the `💸 -x%` row badges disappear or stop updating.
+- [ ] Re-tick the option: a search runs immediately and the row badge returns.
+- [ ] Confirm an unrelated cheaper item (a case, a different capacity, a different brand) is **not** offered as an alternative.
+- [ ] Leave and revisit the same product within 12 hours: no second catalogue search is made.
 
 ### AliExpress
 - [ ] Load an item page: `AliExpress` badge, name, price, and GHS formatting.
@@ -259,5 +290,9 @@ The UI must remain readable.
 | Import says 0 merged | JSON shape is not an object of products, or samples are empty |
 | Smart watch never checks | watch is off, budget exhausted, tab hidden, host backing off, or all products are AliExpress/at-target |
 | Smart watch checks too often | lower `maxChecksPerDay`, raise `minIntervalMs`, or set targets to retire aspirational products |
+| No cheaper alternative found | the title has too few distinctive tokens, the catalogue has no compatible listing, the feature is off, or the 12h throttle/1h failure backoff is active |
+| Wrong cheaper alternative shown | tighten `matchAltCandidate`/`variantsCompatible` and add the rejected pair as a test; do not simply widen the overlap threshold |
+| Delivery badge says Marketplace for an imported item | Jumia did not expose an Express/abroad signal on that page; the badge never guesses |
+| Track button missing | `#wishlist` was not found (non-product page, login wall, or a layout change); check the console and `.jpt-add-col` |
 
 Include browser, userscript manager version, site, URL shape, and console output in bug reports.

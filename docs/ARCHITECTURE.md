@@ -24,6 +24,8 @@ page load (document-end)
              trackCurrentPage()
                 └─ extract → recordPrice() → updatePanel() → notifyDrop()
                                            └─ noteLivePrice() → scheduler metadata
+                                           └─ checkCheaperAlts()  (Jumia, opt-out)
+             initTrackButton()           💰 button under the wishlist heart
 ```
 
 A background smart-watch tick follows the same extraction path with fetched HTML:
@@ -38,23 +40,37 @@ timer → smartWatchTick()
           └─ if price changed → refreshDashboardIfOpen()
 ```
 
+The cheaper-alternative check is a separate, throttled request:
+
+```
+recordPrice → checkCheaperAlts(key)
+                ├─ altCheckDue() (12h TTL, 1h failure backoff)
+                ├─ fetchHtml(altSearchUrl(query))
+                ├─ parseJumiaSearchResults() → rankAltCandidates()
+                ├─ saveAltState({ checkedAt, items, best })
+                ├─ maybeNotifyCheaper() → notify()
+                └─ renderAltPanel() + refreshDashboardIfOpen()
+```
+
 Coupons are handled on every page. Product tracking only runs on pages that match the site's product-page pattern.
 
 ---
 
 ## 2. Module map
 
-The file is divided into nine commented sections, plus the smart-watch module inserted as **4b**:
+The file is divided into nine commented sections, plus the matching-utility module **2b**, the cheaper-alternatives module **4a**, and the smart-watch module **4b**:
 
 | Section | Responsibility | Key functions |
 | --- | --- | --- |
 | 1 | Site detection + config | `SITES`, `SITE`, `IS_ALI`, `CONFIG` |
 | 2 | Utilities | `parsePrice`, `detectCurrency`, `formatMoney`, `formatPrice`, `getProductKey`, `escapeHtml`, `truncate`, `cleanProductName`, `shortDuration`, `latestChange`, `displayName`, `setThumb`, `timeAgo`, `copyToClipboard` |
-| 3 | Price + image extraction | `cleanUrl`, `absoluteImage`, `productNodesOf`, `imageFromDoc`, `extractImage`, `extractFromJsonLd`, `extractFromDomJumia`, `extractFromDomAliExpress`, `extractFromAliExpressState`, `extractFromMeta`, `extractPrice` |
+| **2b** | **Alternative matching** | `normalizeName`, `altNameTokens`, `significantTokens`, `guessBrand`, `accessoryTypes`, `accessoryConflict`, `variantSignature`, `variantsCompatible`, `matchAltCandidate`, `rankAltCandidates`, `altSearchQuery`, `altSearchUrl`, `parseJumiaSearchResults` |
+| 3 | Price + image extraction | `cleanUrl`, `absoluteImage`, `productNodesOf`, `imageFromDoc`, `extractImage`, `extractFromJsonLd`, `extractFromDomJumia`, `extractFromDomAliExpress`, `extractFromAliExpressState`, `extractFromMeta`, `extractPrice`, `extractBrand`, `detectFulfilment`, `fulfilmentInfo` |
 | 4 | Price storage | `loadHistory`, `saveHistory`, `mergeHistoryData`, `recordPrice` |
+| **4a** | **Cheaper alternatives** | `cheaperAltsEnabled`, `setCheaperAltsEnabled`, `altCheckDue`, `checkCheaperAlts`, `maybeNotifyCheaper`, `altPanelText`, `renderAltPanel`, `syncAltsToggles` |
 | **4b** | **Smart watch scheduler** | `loadWatchState`, `selectCanaries`, `watchNextDelay`, `noteLivePrice`, `smartWatchTick`, `checkWatchedProduct`, `applyWatchedPrice`, `initSmartWatch`, `renderWatchStatus` |
 | 5 | Coupons | validation sets, `normalizeCoupon`, `extractCouponsFromDom`, `mergeCoupons`, `loadCoupons`, `saveCoupons`, `purgeInvalidCoupons`, `fetchCouponPage`, `refreshCouponsFromWeb`, `scanCurrentPageForCoupons`, `parseExpiry`, `parseCouponValue`, `rankCoupons` |
-| 6 | Main panel | `createPanel`, `updateTrackedBadge`, `updatePanel`, `renderCoupons` |
+| 6 | Main panel | `createPanel`, `updateTrackedBadge`, `updatePanel`, `renderCoupons`, `initTrackButton`, `syncTrackButton` |
 | 7 | Tracked-products dashboard | `backfillImages`, `editTarget`, `openTrackedModal`, `refreshDashboardIfOpen`, `renderTrackedModal(preserve)` |
 | 8 | Notifications | `notify`, `notifyDrop` |
 | 9 | Main / bootstrap | `isProductPage`, `trackCurrentPage`, `watchSpaNavigation`, `init` |
@@ -156,6 +172,7 @@ Every extractor accepts an explicit `doc` and base URL. The live page uses the d
 history = {
   [productKey]: {
     name, url, site, currency, image?, target?, created,
+    brand?, fulfilment?, alts?,
     samples: [{ p, op?, t, src }],
   }
 }
@@ -167,6 +184,9 @@ history = {
 - Names are cleaned of zero-width characters and only overwrite an existing name when non-empty.
 - `image` is only overwritten when a new image URL is found, so a failed extraction cannot erase a good one.
 - `target` is user-set through the dashboard; it is never derived from a sample and is preserved by merge/import.
+- `brand` (Jumia) comes from the embedded product JSON via `extractBrand`, falling back to the title, and feeds alternative matching.
+- `fulfilment` is `{ kind: 'express'|'abroad'|'local', express, abroad, checkedAt }` and is re-detected on every visit.
+- `alts` caches the alternative search: `{ checkedAt, failedAt, query, items, best, notifiedAt, notifiedUrl }`. `best` is the cheapest compatible listing or `null`.
 
 ### Merge semantics
 `mergeHistoryData(incoming)`:
@@ -174,6 +194,7 @@ history = {
 - Adds unknown product keys verbatim.
 - For known keys, appends samples whose `t` is not already present, re-sorts, and re-trims.
 - Fills missing `name`, `url`, `currency`, `site`, `image`; keeps the earliest `created`.
+- Fills missing `brand`, `fulfilment`, and `alts`.
 - Fills a missing `target` from the import.
 - Ignores products without a non-empty `samples` array.
 - Never deletes existing data.
@@ -277,6 +298,67 @@ Limits enforced in `smartWatchTick`:
 
 ---
 
+## 7c. Cheaper alternatives, fulfilment, and the Track button
+
+### Search request
+
+`checkCheaperAlts(key)` runs only when `SITE.id === 'jumia'`, `cheaperAltsEnabled()` is true, the product exists and is not an AliExpress import, and `altCheckDue` allows it. Due means `now - checkedAt >= 12h`, and not inside the one-hour `failedAt` backoff. An in-flight `Set` prevents duplicate searches for the same key.
+
+The query is the first `CONFIG.alts.queryWords` (12) raw tokens of the display name, URL-encoded into `https://www.jumia.com.gh/catalog/?q=…` and fetched through the shared `fetchHtml` (`GM_xmlhttpRequest`). A thrown request stores `failedAt` and leaves the previous `best` intact, so a temporary block does not erase a known cheaper listing. State is written with `saveAltState`, which merges a patch into `history[key].alts` and saves.
+
+### Result parsing (`parseJumiaSearchResults`)
+
+Parses the fetched HTML with `DOMParser` and walks `article.prd` cards:
+
+- `a.core[href]` must end in `.html`; the current product's path and key are skipped, and duplicate URLs are dropped.
+- The name comes from `.info .name`, cleaned with `cleanProductName`.
+- The price comes from the **visible `.prc` text**, parsed with `parsePrice`. `data-gtm-price`/`data-ga4-price` are EUR and must never be used.
+- The image is the first `img.img` `data-src`/`src`, resolved with `absoluteImage`.
+- The brand is the card's `data-ga4-item_brand` / `data-gtm-brand`.
+- `express` is `.bdg._xprs`; `abroad` is explicit "shipped/ships from abroad" card text or `.bdg._glb` / `.bdg._gbl`.
+
+Parsing stops after 40 cards. Every field is page data and is escaped at render time.
+
+### Matching (`matchAltCandidate` / `rankAltCandidates`)
+
+Matching is intentionally strict: a wrong alternative is worse than none. A candidate is rejected outright when:
+
+1. **Accessory conflict** — one title names an accessory type (`case`, `charger`, `protector`, `stand`, `strap`, `bag`, `replacement`) that the other does not.
+2. **Variant conflict** — capacities differ (`mah`, `gb`, `tb` are hard: a missing value on one side also rejects), as do `ml`, `l`, `w`, `ah`, `v`, `hz`, `ghz`, `mp` when both sides state one. Thousands separators are normalised first, so `20,000mAh` and `20000mAh` compare equal.
+3. Fewer than `min(2, tokens)` shared significant tokens, or (strict mode) no shared leading token.
+4. No shared "modelish" token (contains a digit or is at least four characters).
+5. Significant-token overlap below **0.5** (strict) or **0.6** (relaxed).
+6. Both sides have a known brand and the brands differ.
+
+`significantTokens` drops stop words, marketing filler, and colour words, so "Original Black 20000mAh" contributes only the capacity and model terms. A surviving match scores `overlap + min(0.2, modelTokens × 0.02)`. `rankAltCandidates` keeps strict matches when any exist, otherwise relaxed ones, sorts by price and then score, and returns all candidates. `checkCheaperAlts` stores the first six and the cheapest as `best`.
+
+### Notifications
+
+`maybeNotifyCheaper` requires a saving of at least `minSavingAmount` (GH₵ 1) **and** `minSavingPercent` (3%), and at most one notification per product per `notifyCooldownMs` (24h). The text names the product, current price, alternative, and saving, and marks an Express alternative. The cooldown is stored on `alts.notifiedAt`; re-enabling the feature does not reset it.
+
+### Fulfilment detection (`detectFulfilment`)
+
+Returns `{ kind, express, abroad }`:
+
+- **express** — `"isShopExpress":true` in the page HTML, a `.bdg._xprs` badge, or `Jumia Express` inside the *Delivery & Returns* card.
+- **abroad** — explicit "shipped/ships/shipping from abroad" text, `"isJumiaGlobal":true`, or `.bdg._glb` / `.bdg._gbl`.
+- **local** — neither; labelled **🏬 Marketplace seller** rather than guessed as abroad.
+
+Express wins when both signals appear, because the Express badge is the stronger, user-visible claim. `fulfilmentInfo(f)` converts the kind into `{ cls, text, title }` for the panel and dashboard, so the wording exists in exactly one place. AliExpress never receives these badges.
+
+### Track button (`initTrackButton`)
+
+Jumia product pages only. The script locates `#wishlist` (or `a[data-track-onclick="wishlist"]`), inserts a `.jpt-add-col` column before it, moves the heart inside, and appends a `.jpt-add-track` button below. The column is a real flex column, so the button sits directly under the heart without absolute positioning.
+
+- `syncTrackButton()` re-reads the history and sets `.tracked`, the label (**Track price** / **Tracked — open**), and the tooltip.
+- `onAddTrackClick()` records the product when it is missing (calling `recordPrice`, `updatePanel`, `updateTrackedBadge`, and `checkCheaperAlts`), shows a panel toast when no price is available yet, then opens the dashboard.
+- `updateTrackedBadge` calls `syncTrackButton`, so deleting a product or a background record keeps the button truthful.
+- `initTrackButton` runs from `init` and from the SPA navigation watcher, and is idempotent (it re-syncs instead of injecting a second button).
+
+Because the heart is moved into a wrapper, the page's own wishlist click handler still receives the same element and attributes.
+
+---
+
 ## 8. Coupons
 
 Extraction is deliberately conservative but multi-source:
@@ -302,7 +384,9 @@ Web sync honours `CONFIG.couponCacheTTLMs` (6 hours) unless forced by **Find Cou
 ### Panel (`createPanel`)
 - Fixed, bottom-right by default, isolated by a unique ID.
 - One `GM_addStyle` block; explicit colours and `color-scheme: only light`.
-- `updatePanel(result)` sets the product name (`displayName`), thumbnail (`setThumb`), current price, stats, and drop message.
+- `updatePanel(result)` sets the product name (`displayName`), thumbnail (`setThumb`), current price, stats, drop message, and the `.jpt-fulfilment` pill (`fulfilmentInfo`).
+- A `.jpt-alts` block sits under the stats: a header with the on/off checkbox, and a body rendered by `altPanelText` (searching / no match / cheapest match with saving, Express marker, and check time). `renderAltPanel` rewrites it after every record, search, or toggle, and hides it on AliExpress.
+- `initTrackButton()` injects the 💰 button under the wishlist heart (see §7c).
 - `renderCoupons()` rebuilds the coupon list from the cache on demand.
 - Buttons wire directly to `recordPrice`, `refreshCouponsFromWeb`, storage clears, and the dashboard.
 
@@ -317,7 +401,7 @@ The panel is draggable by its title bar, using the same pattern as the dashboard
 
 ### Dashboard (`openTrackedModal` / `renderTrackedModal`)
 - Modal with a fixed backdrop, smart-watch bar, toolbar, list, import overlay, and footer actions.
-- The smart-watch bar contains the enable checkbox, live status text, and **Check now**. `renderWatchStatus` only reads/updates this bar, so it is safe to call after any list render.
+- The smart-watch bar contains the enable checkbox, the **💸 Cheaper** alternatives checkbox, live status text, and **Check now**. `renderWatchStatus` only reads/updates this bar, so it is safe to call after any list render. Both checkboxes write their preference and re-render the panel/dashboard immediately.
 - Rows are generated from history; sorting/filtering happens in memory and re-renders the list only.
 - `renderTrackedModal(preserve)` reads `.jtm-search`, `.jtm-sort`, and `.jtm-body.scrollTop` before replacing the body, then restores them. `refreshDashboardIfOpen()` calls it with `preserve = true` when a price change lands, so an open dashboard updates without losing the user's view. The same call runs on `visibilitychange` when a tab becomes visible, which covers a change recorded by another tab.
 - `latestChange(product)` walks samples backwards to find the most recent pair of differing prices. This is deliberately not "compare the last two samples": the daily `src: 'watch'` baseline can append an unchanged point after a real movement.
@@ -327,6 +411,7 @@ The panel is draggable by its title bar, using the same pattern as the dashboard
   - **Tag:** `<span class="jtm-tag">` with an `.ali` modifier for AliExpress.
   - **Change badge:** `<span class="jtm-flag down|up">` with `↓`/`↑` and the percentage move, shown only when the movement is within `CONFIG.watch.changeHighlightMs` (7 days). The row also gets `.changed` plus `.down`/`.up` for tinting.
   - **Target:** `<button class="jtm-target">`; shows `🎯 set` when unset, the formatted target when set, and a green `.met` state when the current price is at/below it. Clicking calls `editTarget`.
+- Jumia rows also render `<span class="jtm-fship express|abroad|local">` from `fulfilmentInfo`, and a `<a class="jtm-flag alt">💸 −x%</a>` when `alts.best` beats the current price by the notification threshold. The alt badge sits above the row's invisible name link (`z-index`), so it opens the alternative instead of the tracked product.
 - The sort menu includes **Recent changes**, which orders by `latestChange(...).t` with the last sample time as a tie-breaker.
 - The chosen sort is written to `jumia_gh_dash_sort` on `change` and read on every fresh render, so reopening the dashboard restores it. Unknown values fall back to `recent`.
 - A capture-phase `error` listener on the modal swaps broken images for the placeholder (image `error` events do not bubble).
@@ -369,6 +454,8 @@ All page/history-derived strings pass through `escapeHtml` before interpolation 
 
 The smart watch additionally notifies once when a price crosses below its stored `target` (previous sample above target, new sample at/below).
 
+`maybeNotifyCheaper` sends a separate notification for a cheaper same-product Jumia listing. It requires `saving >= minSavingAmount` (1) **and** `pct >= minSavingPercent` (3), and respects a per-product 24-hour cooldown stored in `alts.notifiedAt`. It is skipped entirely when the feature is off, and it never fires for AliExpress products.
+
 ---
 
 ## 11. Design constraints (do not break)
@@ -382,6 +469,8 @@ The smart watch additionally notifies once when a price crosses below its stored
 - **Escape before injecting.** Every interpolated value is treated as untrusted.
 - **Politeness is a feature.** Background checks must stay opt-in, visible in the UI, budget-capped, spaced, and conditional. Do not remove the budget/lease/backoff guards to make checks "faster".
 - **Background extraction must use the passed `doc`/`base`.** Never read the live `document` inside an extractor.
+- **Never guess a product match.** Alternative matching must stay conservative; loosen `matchAltCandidate` only with new tests that prove accessories and different capacities are still rejected.
+- **Label only what the page states.** A missing abroad signal is labelled *Marketplace seller*, never *Ships from abroad*.
 
 ---
 
@@ -399,6 +488,9 @@ The smart watch additionally notifies once when a price crosses below its stored
 | Change smart-watch aggressiveness | `CONFIG.watch` (`maxChecksPerDay`, `tickMs`, `minGapMs`, intervals) |
 | Change scheduling policy | `selectCanaries`, `watchNextDelay`, `dueCandidates`, `chooseWatchCandidate` |
 | Add a request type | `fetchWatchPage` + a host entry in `CONFIG.watch` |
+| Change alternative matching | `matchAltCandidate`, `variantsCompatible`, `accessoryConflict`, `rankAltCandidates` + the matching tests |
+| Change alternative cadence | `CONFIG.alts` (`checkIntervalMs`, `failBackoffMs`, `notifyCooldownMs`, thresholds) |
+| Change delivery labels | `detectFulfilment` / `fulfilmentInfo` |
 | Add import formats | `mergeHistoryData` |
 
 After any change: run `node --check`, exercise the affected flow with stubbed GM APIs, and update `CHANGELOG.md`.

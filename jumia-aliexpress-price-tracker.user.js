@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Jumia Ghana – Price Tracker + Coupons + Dashboard
 // @namespace    https://github.com/yourname/jumia-price-tracker
-// @version      3.10.3
-// @description  Robust price tracker with product images, persistent coupon finder, and tracking dashboard for jumia.com.gh and aliexpress.com (Ghana / GHS)
+// @version      3.11.0
+// @description  Price tracker with product images, cheaper-alternative finder, Jumia Express/abroad badges, coupons, and a tracking dashboard for jumia.com.gh and aliexpress.com (Ghana / GHS)
 // @author       Oxide5401
 // @homepageURL  https://github.com/Oxide5401/Jumia-and-AliExpress-Price-Tracker
 // @supportURL   https://github.com/Oxide5401/Jumia-and-AliExpress-Price-Tracker/issues
@@ -125,6 +125,20 @@
             requestTimeoutMs: 20000,
             fetchAliExpress: false,       // AliExpress blocks scripted fetches
             leaseMs: 90000,               // cross-tab lock lifetime
+        },
+
+        // ── Cheaper alternatives (Jumia only, opt-out) ────────────────
+        // One catalog search per product, at most twice a day, looking for
+        // the same item listed by another seller at a lower price.
+        cheaperAltsKey: 'jumia_gh_cheaper_alts',
+        alts: {
+            checkIntervalMs: 12 * 60 * 60 * 1000,
+            failBackoffMs: 60 * 60 * 1000,
+            notifyCooldownMs: 24 * 60 * 60 * 1000,
+            minSavingPercent: 3,
+            minSavingAmount: 1,
+            maxItems: 6,
+            queryWords: 12,
         },
     };
 
@@ -356,6 +370,242 @@
             catch (e) { reject(e); }
             finally { document.body.removeChild(ta); }
         });
+    }
+
+    // ──────────────────────────────────────────────────────────────
+    // 2b. SIMILAR-PRODUCT MATCHING (cheaper alternatives)
+    // ──────────────────────────────────────────────────────────────
+    // Deliberately conservative: a wrong "cheaper alternative" is worse
+    // than none, because it would send the shopper to a phone case when
+    // they are looking at a phone.
+    const NAME_STOP = new Set([
+        'a', 'an', 'the', 'and', 'or', 'for', 'with', 'of', 'to', 'in', 'on', 'by',
+        'from', 'at', 'as', 'is', 'are', 'be', 'this', 'that', 'new', 'original',
+        'latest', 'version', 'edition', 'plus', 'free', 'shipping', 'delivery',
+        'genuine', 'official', 'pcs', 'pc', 'piece', 'pieces', 'set', 'pack',
+        'combo', 'kit', 'inch', 'inches', 'cm', 'mm', 'style', 'type', 'model',
+        'series', 'upgraded', 'upgrade', 'high', 'quality', 'premium', 'portable',
+        'includes', 'include', 'built', 'build', 'inbuilt', 'builtin',
+    ]);
+    const COLOUR_WORDS = new Set([
+        'black', 'white', 'blue', 'red', 'green', 'grey', 'gray', 'silver', 'gold',
+        'pink', 'purple', 'brown', 'beige', 'multi', 'colour', 'color', 'clear',
+        'transparent', 'rose', 'navy', 'orange', 'yellow',
+    ]);
+    const GENERIC_BRANDS = new Set([
+        'phone', 'case', 'cover', 'charger', 'cable', 'power', 'bank', 'watch',
+        'laptop', 'tablet', 'rice', 'cooker', 'blender', 'speaker', 'headphone',
+        'headphones', 'earbuds', 'earphone', 'keyboard', 'mouse', 'usb', 'led',
+        'tv', 'camera', 'printer', 'battery', 'bag', 'shoe', 'shoes', 'dress',
+        'shirt', 'other', 'generic', 'universal', 'smart', 'wireless', 'fast',
+        'electric', 'digital', 'mini', 'large', 'small', 'super', 'ultra',
+    ]);
+
+    const ACCESSORY_PATTERNS = [
+        ['case', /\b(case|cover|bumper|flip cover|pouch|sleeve|skin)\b/],
+        ['charger', /\b(charger|charging adapter|power adapter|adapter)\b/],
+        ['protector', /\b(screen protector|tempered glass|screen guard|protector)\b/],
+        ['stand', /\b(holder|stand|mount|dock|kickstand|bracket)\b/],
+        ['strap', /\b(strap|band|bracelet)\b/],
+        ['bag', /\b(bag|backpack|handbag)\b/],
+        ['replacement', /\b(replacement|spare part|spare)\b/],
+    ];
+
+    function normalizeName(s) {
+        return String(s == null ? '' : s)
+            .toLowerCase()
+            .normalize('NFKD')
+            .replace(/[\u0300-\u036f]/g, '')
+            .replace(/[^\p{L}\p{N}]+/gu, ' ')
+            .trim();
+    }
+    function altNameTokens(s) {
+        return (normalizeName(s).match(/[\p{L}\p{N}]+/gu) || []).filter(t => t.length >= 2);
+    }
+    function significantTokens(s) {
+        return altNameTokens(s).filter(t => !NAME_STOP.has(t) && !COLOUR_WORDS.has(t));
+    }
+    function guessBrand(name) {
+        const toks = significantTokens(name);
+        if (!toks.length) return '';
+        return GENERIC_BRANDS.has(toks[0]) ? '' : toks[0];
+    }
+    function brandKey(s) {
+        return normalizeName(s).replace(/\s+/g, '');
+    }
+    function accessoryTypes(name) {
+        const text = ' ' + normalizeName(name) + ' ';
+        const out = new Set();
+        for (const [id, re] of ACCESSORY_PATTERNS) if (re.test(text)) out.add(id);
+        return out;
+    }
+    /** True when one listing is an accessory/variant of the other. */
+    function accessoryConflict(a, b) {
+        const A = accessoryTypes(a), B = accessoryTypes(b);
+        for (const id of A) if (!B.has(id)) return true;
+        for (const id of B) if (!A.has(id)) return true;
+        return false;
+    }
+    function variantSignature(name) {
+        const out = {};
+        // Join thousands separators so "20,000mAh" and "20000mAh" compare equal.
+        const text = String(name == null ? '' : name)
+            .toLowerCase()
+            .replace(/(\d)[,\u00a0\s](?=\d{3}(?!\d))/g, '$1');
+        for (const t of altNameTokens(text)) {
+            const m = t.match(/^(\d+(?:\.\d+)?)(mah|gb|tb|ml|l|w|ah|v|hz|ghz|mp)$/);
+            if (!m) continue;
+            if (out[m[2]] == null) out[m[2]] = parseFloat(m[1]);
+        }
+        return out;
+    }
+    /** Rejects a 10,000 mAh bank against a 20,000 mAh one, 128GB vs 256GB, etc. */
+    function variantsCompatible(a, b) {
+        const A = variantSignature(a), B = variantSignature(b);
+        const hard = ['mah', 'gb', 'tb'];
+        for (const k of ['mah', 'gb', 'tb', 'ml', 'l', 'w', 'ah', 'v', 'hz', 'ghz', 'mp']) {
+            if (A[k] != null && B[k] != null && Math.abs(A[k] - B[k]) > 1e-9) return false;
+            if (hard.includes(k) && A[k] != null && B[k] == null) return false;
+        }
+        return true;
+    }
+    /**
+     * Scores how likely two Jumia titles describe the same product.
+     * Returns 0 when the pair must not be compared.
+     */
+    function matchAltCandidate(current, candidate, { relaxed = false } = {}) {
+        const aName = (current && current.name) || '';
+        const bName = (candidate && candidate.name) || '';
+        if (!aName || !bName) return 0;
+        if (accessoryConflict(aName, bName)) return 0;
+        if (!variantsCompatible(aName, bName)) return 0;
+
+        const a = significantTokens(aName), b = significantTokens(bName);
+        if (!a.length || !b.length) return 0;
+        const bSet = new Set(b);
+        const shared = a.filter(t => bSet.has(t));
+        if (shared.length < Math.min(2, a.length)) return 0;
+        if (!relaxed && !a.slice(0, 2).some(t => bSet.has(t))) return 0;
+
+        const modelish = shared.filter(t => /\d/.test(t) || t.length >= 4);
+        if (!modelish.length) return 0;
+        const overlap = shared.length / a.length;
+        if (overlap < (relaxed ? 0.6 : 0.5)) return 0;
+
+        const brandA = (current && current.brand) || guessBrand(aName);
+        const brandB = (candidate && candidate.brand) || guessBrand(bName);
+        if (brandA && candidate && candidate.brand && brandKey(brandA) !== brandKey(brandB)) return 0;
+        return overlap + Math.min(0.2, modelish.length * 0.02);
+    }
+    function rankAltCandidates(current, items) {
+        const strict = [], loose = [];
+        for (const c of items) {
+            if (!(c.price > 0)) continue;
+            const s = matchAltCandidate(current, c);
+            if (s) strict.push({ ...c, score: s });
+            else {
+                const l = matchAltCandidate(current, c, { relaxed: true });
+                if (l) loose.push({ ...c, score: l });
+            }
+        }
+        const ranked = (strict.length ? strict : loose)
+            .sort((x, y) => x.price - y.price || y.score - x.score);
+        return ranked;
+    }
+    function altSearchQuery(name) {
+        const toks = String(name == null ? '' : name)
+            .replace(/[^\p{L}\p{N}]+/gu, ' ').trim().split(/\s+/).filter(Boolean);
+        return toks.slice(0, CONFIG.alts.queryWords).join(' ');
+    }
+    function altSearchUrl(query) {
+        return 'https://www.jumia.com.gh/catalog/?q=' + encodeURIComponent(query);
+    }
+
+    /**
+     * Reads Jumia's search cards. Prices come from the visible `.prc` text
+     * (GHS); the data-ga4/data-gtm prices are EUR and must not be used.
+     */
+    function parseJumiaSearchResults(html, currentUrl, currentKey) {
+        let doc;
+        try { doc = new DOMParser().parseFromString(String(html || ''), 'text/html'); }
+        catch { return []; }
+        const out = [];
+        const seen = new Set();
+        const currentPath = (() => {
+            try { return new URL(currentUrl || location.href).pathname; } catch { return ''; }
+        })();
+        for (const art of doc.querySelectorAll('article.prd')) {
+            const link = art.querySelector('a.core[href]');
+            if (!link) continue;
+            const href = link.getAttribute('href') || '';
+            if (!/\.html(?:$|[?#])/.test(href)) continue;
+            let url;
+            try { url = new URL(href, 'https://www.jumia.com.gh').href.split(/[?#]/)[0]; }
+            catch { continue; }
+            try { if (currentPath && new URL(url).pathname === currentPath) continue; } catch { }
+            const key = (url.match(/([a-zA-Z0-9\-]+)\.html$/) || [])[1] || '';
+            if (currentKey && key === currentKey) continue;
+            if (seen.has(url)) continue;
+
+            const info = art.querySelector('.info') || art;
+            const nameEl = info.querySelector('.name') || art.querySelector('.name');
+            const name = cleanProductName(nameEl ? nameEl.textContent : (link.getAttribute('data-gtm-name') || ''));
+            if (!name) continue;
+            const priceEl = info.querySelector('.prc');
+            const price = parsePrice(priceEl ? priceEl.textContent : '');
+            if (!(price > 0)) continue;
+
+            const img = art.querySelector('img.img');
+            const image = absoluteImage(
+                img && (img.getAttribute('data-src') || img.getAttribute('src')),
+                'https://www.jumia.com.gh'
+            );
+            const brand = cleanProductName(
+                link.getAttribute('data-ga4-item_brand') || link.getAttribute('data-gtm-brand') || ''
+            );
+            const cardText = art.textContent || '';
+            seen.add(url);
+            out.push({
+                url, name, price, brand, image,
+                express: !!art.querySelector('.bdg._xprs'),
+                abroad: /(?:ships?|shipped|shipping)\s+from\s+abroad/i.test(cardText) ||
+                    !!art.querySelector('.bdg._glb, .bdg._gbl'),
+            });
+            if (out.length >= 40) break;
+        }
+        return out;
+    }
+
+    // ── Jumia fulfilment: Express vs. marketplace / abroad ────────
+    function detectFulfilment(doc = document) {
+        const html = (doc.documentElement && doc.documentElement.innerHTML) || '';
+        const text = (doc.body && doc.body.textContent) || '';
+        const cards = [...doc.querySelectorAll('section.card, article')];
+        const delivery = cards.find(el => /Delivery\s*&\s*Returns/i.test(el.textContent || ''));
+        const express = /"isShopExpress"\s*:\s*true/.test(html) ||
+            !!doc.querySelector('.bdg._xprs') ||
+            !!(delivery && /Jumia Express/i.test(delivery.textContent || ''));
+        const abroad = /(?:ships?|shipped|shipping)\s+from\s+abroad/i.test(text) ||
+            /"isJumiaGlobal"\s*:\s*true/i.test(html) ||
+            !!doc.querySelector('.bdg._glb, .bdg._gbl');
+        if (express) return { kind: 'express', express: true, abroad: false };
+        if (abroad) return { kind: 'abroad', express: false, abroad: true };
+        return { kind: 'local', express: false, abroad: false };
+    }
+    function fulfilmentInfo(f) {
+        if (!f || !f.kind) return null;
+        if (f.kind === 'express') return {
+            cls: 'express', text: '⚡ Jumia Express',
+            title: 'Stocked by Jumia and eligible for fast Jumia Express delivery.',
+        };
+        if (f.kind === 'abroad') return {
+            cls: 'abroad', text: '✈ Ships from abroad',
+            title: 'This listing ships from outside Ghana, so delivery is usually slower.',
+        };
+        return {
+            cls: 'local', text: '🏬 Marketplace seller',
+            title: 'Sold by a Jumia marketplace seller and not part of Jumia Express.',
+        };
     }
 
     // ──────────────────────────────────────────────────────────────
@@ -665,6 +915,16 @@
         return null;
     }
 
+    /** Jumia embeds the brand in its page JSON; fall back to the title. */
+    function extractBrand(doc = document) {
+        const html = (doc.documentElement && doc.documentElement.innerHTML) || '';
+        const m = html.match(/"brand"\s*:\s*"([^"]{1,60})"/);
+        const raw = m ? m[1] : '';
+        const brand = cleanProductName(raw);
+        if (!brand || /^(other|generic|unbranded)$/i.test(brand)) return '';
+        return brand;
+    }
+
     // ──────────────────────────────────────────────────────────────
     // 4. PRICE STORAGE
     // ──────────────────────────────────────────────────────────────
@@ -710,6 +970,9 @@
             ex.currency = ex.currency || p.currency || SITE.currency;
             ex.site = ex.site || p.site;
             ex.image = ex.image || p.image;
+            ex.brand = ex.brand || p.brand;
+            ex.fulfilment = ex.fulfilment || p.fulfilment;
+            ex.alts = ex.alts || p.alts;
             if (p.listingChangedAt && (!ex.listingChangedAt || p.listingChangedAt > ex.listingChangedAt))
                 ex.listingChangedAt = p.listingChangedAt;
             if (ex.target == null && typeof p.target === 'number') ex.target = p.target;
@@ -760,6 +1023,17 @@
         product.url = location.href;
         product.currency = info.currency || product.currency || SITE.currency;
         product.site = SITE.id;
+
+        // Jumia-only: record the brand (for matching) and how the item ships.
+        if (SITE.id === 'jumia') {
+            try {
+                const brand = extractBrand();
+                if (brand) product.brand = brand;
+                const fulfilment = detectFulfilment();
+                if (fulfilment) product.fulfilment = { ...fulfilment, checkedAt: now };
+            } catch (e) { warn('fulfilment/brand detection failed', e); }
+        }
+
         saveHistory(history);
 
         const changed = !!(last && last.p !== info.price);
@@ -769,6 +1043,166 @@
         let dropPercent = null;
         if (last && info.price < last.p) dropPercent = ((last.p - info.price) / last.p) * 100;
         return { product, isNew: !last, dropPercent, info, listing };
+    }
+
+    // ──────────────────────────────────────────────────────────────
+    // 4a. CHEAPER ALTERNATIVES — one search per product, opt-out
+    // ──────────────────────────────────────────────────────────────
+    const altInFlight = new Set();
+
+    function cheaperAltsEnabled() {
+        return GM_getValue(CONFIG.cheaperAltsKey, true) !== false;
+    }
+    function setCheaperAltsEnabled(value) {
+        GM_setValue(CONFIG.cheaperAltsKey, !!value);
+    }
+    function altFields(c) {
+        return {
+            url: c.url, name: c.name, price: c.price,
+            brand: c.brand || '', image: c.image || '',
+            express: !!c.express, abroad: !!c.abroad,
+        };
+    }
+    function saveAltState(key, patch) {
+        const h = loadHistory();
+        if (!h[key]) return;
+        h[key].alts = { ...(h[key].alts || {}), ...patch };
+        saveHistory(h);
+    }
+    function altCheckDue(product) {
+        const a = (product && product.alts) || {};
+        const now = Date.now();
+        if (a.failedAt && now - a.failedAt < CONFIG.alts.failBackoffMs) return false;
+        return now - (a.checkedAt || 0) >= CONFIG.alts.checkIntervalMs;
+    }
+
+    async function checkCheaperAlts(key, { force = false } = {}) {
+        if (SITE.id !== 'jumia' || !cheaperAltsEnabled()) return null;
+        const product = loadHistory()[key];
+        if (!product || product.site === 'aliexpress') return null;
+        if (!force && !altCheckDue(product)) return null;
+        if (altInFlight.has(key)) return null;
+        const currentPrice = priceOf(product);
+        const name = displayName(key, product);
+        const query = altSearchQuery(name);
+        if (currentPrice == null || altNameTokens(query).length < 2) return null;
+
+        altInFlight.add(key);
+        let html;
+        try {
+            html = await fetchHtml(altSearchUrl(query));
+        } catch (e) {
+            warn('cheaper-alternative search failed', e);
+            saveAltState(key, { failedAt: Date.now() });
+            altInFlight.delete(key);
+            renderAltPanel();
+            return null;
+        }
+
+        try {
+            const items = parseJumiaSearchResults(html, product.url, key);
+            const ranked = rankAltCandidates({ name, brand: product.brand || '' }, items);
+            const best = ranked[0] || null;
+            saveAltState(key, {
+                checkedAt: Date.now(),
+                failedAt: 0,
+                query,
+                items: ranked.slice(0, CONFIG.alts.maxItems).map(altFields),
+                best: best ? altFields(best) : null,
+            });
+            const fresh = loadHistory()[key];
+            if (best && fresh) maybeNotifyCheaper(key, fresh, best);
+            renderAltPanel();
+            refreshDashboardIfOpen();
+            log(`Cheaper alternatives: ${ranked.length} match(es)` +
+                (best ? `, best ${formatMoney(best.price, product.currency || 'GHS')}` : ''));
+            return best;
+        } finally {
+            altInFlight.delete(key);
+        }
+    }
+
+    function maybeNotifyCheaper(key, product, best) {
+        if (!cheaperAltsEnabled() || !best) return;
+        const current = priceOf(product);
+        if (current == null) return;
+        const saving = current - best.price;
+        const pct = current > 0 ? (saving / current) * 100 : 0;
+        if (saving < CONFIG.alts.minSavingAmount || pct < CONFIG.alts.minSavingPercent) return;
+
+        const alts = product.alts || {};
+        if (alts.notifiedAt && Date.now() - alts.notifiedAt < CONFIG.alts.notifyCooldownMs) return;
+
+        const code = product.currency || 'GHS';
+        notify(
+            'Cheaper alternative on Jumia',
+            `${displayName(key, product)}\nCurrent: ${formatMoney(current, code)}\n` +
+            `${truncate(best.name, 90)} — ${formatMoney(best.price, code)}` +
+            (best.express ? ' · ⚡ Express' : '') + `\n` +
+            `Save ${formatMoney(saving, code)} (${pct.toFixed(0)}%)`
+        );
+        saveAltState(key, { notifiedAt: Date.now(), notifiedUrl: best.url });
+    }
+
+    function altPanelText(product) {
+        const code = (product && product.currency) || 'GHS';
+        const alts = (product && product.alts) || null;
+        if (!product) return { html: 'Waiting for this page\u2019s price…' };
+        if (!alts || (!alts.checkedAt && !alts.failedAt))
+            return { html: 'Checking Jumia for a cheaper match…' };
+        const best = alts.best;
+        if (!best) {
+            return {
+                html: alts.checkedAt
+                    ? `No similar listing found. Checked ${timeAgo(alts.checkedAt)}.`
+                    : 'Search unavailable — will retry later.',
+            };
+        }
+        const current = priceOf(product);
+        const saving = current != null ? current - best.price : null;
+        const pct = current > 0 ? (saving / current) * 100 : 0;
+        const cheaper = saving != null &&
+            saving >= CONFIG.alts.minSavingAmount && pct >= CONFIG.alts.minSavingPercent;
+        const meta = `${formatMoney(best.price, code)}` +
+            (cheaper
+                ? ` <b class="jpt-alt-save">−${pct.toFixed(0)}%</b> (save ${formatMoney(saving, code)})`
+                : ' <span class="jpt-alt-same">not cheaper</span>') +
+            (best.express ? ' · <span class="jpt-alt-xprs">⚡ Express</span>' : '') +
+            (best.abroad ? ' · <span class="jpt-alt-abroad">✈ Abroad</span>' : '');
+        return {
+            html: `<a class="jpt-alt-link" href="${escapeHtml(best.url)}" target="_blank" rel="noopener"` +
+                ` title="${escapeHtml(best.name)}">${escapeHtml(truncate(best.name, 62))}</a>` +
+                `<div class="jpt-alt-meta">${meta}</div>` +
+                `<div class="jpt-alt-when">Checked ${timeAgo(alts.checkedAt)}</div>`,
+        };
+    }
+
+    function renderAltPanel() {
+        const panel = document.getElementById(CONFIG.uiPanelId);
+        if (!panel) return;
+        const block = panel.querySelector('.jpt-alts');
+        if (!block) return;
+        if (SITE.id !== 'jumia') { block.hidden = true; return; }
+        block.hidden = false;
+        const enabled = cheaperAltsEnabled();
+        const cb = block.querySelector('.jpt-alts-cb');
+        if (cb) cb.checked = enabled;
+        block.classList.toggle('off', !enabled);
+        const body = block.querySelector('.jpt-alts-body');
+        if (!body) return;
+        if (!enabled) {
+            body.innerHTML = '<span class="jpt-alts-off">Off — turn on to look for cheaper Jumia listings.</span>';
+            return;
+        }
+        const key = getProductKey();
+        const product = loadHistory()[key];
+        body.innerHTML = altPanelText(product).html;
+    }
+
+    function syncAltsToggles() {
+        const enabled = cheaperAltsEnabled();
+        document.querySelectorAll('.jtm-alts-cb, .jpt-alts-cb')
+            .forEach(cb => { cb.checked = enabled; });
     }
 
     // ──────────────────────────────────────────────────────────────
@@ -1382,6 +1816,8 @@
         if (!modal) return;
         const cb = modal.querySelector('.jtm-watch-cb');
         if (cb) cb.checked = swEnabled();
+        const altsCb = modal.querySelector('.jtm-alts-cb');
+        if (altsCb) altsCb.checked = cheaperAltsEnabled();
         const status = modal.querySelector('.jtm-watch-status');
         if (status) status.textContent = watchStatusText();
         const checkNow = modal.querySelector('.jtm-watch-now');
@@ -2203,8 +2639,18 @@
                     <span class="jpt-product-name"></span>
                 </div>
                 <div class="jpt-current">Detecting…</div>
+                <div class="jpt-fulfilment" hidden></div>
                 <div class="jpt-stats"></div>
                 <div class="jpt-listing" hidden></div>
+                <div class="jpt-alts" hidden>
+                    <div class="jpt-alts-head">
+                        <span class="jpt-alts-title">💸 Cheaper alternatives</span>
+                        <label class="jpt-alts-toggle" title="Look for the same product listed cheaper by another Jumia seller.">
+                            <input type="checkbox" class="jpt-alts-cb" /> on
+                        </label>
+                    </div>
+                    <div class="jpt-alts-body"></div>
+                </div>
                 <div class="jpt-actions">
                     <button class="jpt-btn jpt-refresh">Refresh</button>
                     <button class="jpt-btn jpt-find-coupons">Find Coupons</button>
@@ -2287,7 +2733,50 @@
                 -webkit-box-orient: vertical; overflow: hidden;
             }
             #${CONFIG.uiPanelId} .jpt-current { margin-bottom: 6px; font-weight: 600; }
+            #${CONFIG.uiPanelId} .jpt-fulfilment {
+                display: inline-flex; align-items: center; gap: 4px;
+                margin: -2px 0 7px; padding: 2px 7px;
+                border-radius: 999px; font-size: 10px; font-weight: 700;
+                letter-spacing: .2px; line-height: 1.3;
+            }
+            #${CONFIG.uiPanelId} .jpt-fulfilment.express {
+                color: #0f7434; background: #e7f6ec; border: 1px solid #bfe6cb;
+            }
+            #${CONFIG.uiPanelId} .jpt-fulfilment.abroad {
+                color: #2456a6; background: #eaf1ff; border: 1px solid #cfdcff;
+            }
+            #${CONFIG.uiPanelId} .jpt-fulfilment.local {
+                color: #666; background: #f3f3f3; border: 1px solid #ddd;
+            }
             #${CONFIG.uiPanelId} .jpt-stats { margin-bottom: 10px; color: #666; font-size: 12px; }
+            #${CONFIG.uiPanelId} .jpt-alts {
+                margin: 0 0 10px; padding: 7px 8px;
+                background: #fbfdff; border: 1px solid #dbe8f7; border-radius: 6px;
+                font-size: 11px; line-height: 1.4;
+            }
+            #${CONFIG.uiPanelId} .jpt-alts.off { background: #fafafa; border-color: #e6e6e6; }
+            #${CONFIG.uiPanelId} .jpt-alts-head {
+                display: flex; align-items: center; justify-content: space-between; gap: 8px;
+            }
+            #${CONFIG.uiPanelId} .jpt-alts-title { font-weight: 700; color: #333; }
+            #${CONFIG.uiPanelId} .jpt-alts-toggle {
+                display: flex; align-items: center; gap: 4px;
+                font-size: 10px; color: #777; cursor: pointer; white-space: nowrap;
+            }
+            #${CONFIG.uiPanelId} .jpt-alts-toggle input { margin: 0; cursor: pointer; }
+            #${CONFIG.uiPanelId} .jpt-alts-body { margin-top: 3px; color: #666; }
+            #${CONFIG.uiPanelId} .jpt-alt-link {
+                display: block; color: #0b62c4; font-weight: 600; text-decoration: none;
+                overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+            }
+            #${CONFIG.uiPanelId} .jpt-alt-link:hover { text-decoration: underline; }
+            #${CONFIG.uiPanelId} .jpt-alt-meta { margin-top: 1px; color: #444; }
+            #${CONFIG.uiPanelId} .jpt-alt-save { color: #0f7434; }
+            #${CONFIG.uiPanelId} .jpt-alt-same { color: #a15c00; }
+            #${CONFIG.uiPanelId} .jpt-alt-xprs { color: #0f7434; font-weight: 700; }
+            #${CONFIG.uiPanelId} .jpt-alt-abroad { color: #2456a6; font-weight: 700; }
+            #${CONFIG.uiPanelId} .jpt-alt-when { color: #999; font-size: 10px; margin-top: 1px; }
+            #${CONFIG.uiPanelId} .jpt-alts-off { color: #888; }
             #${CONFIG.uiPanelId} .jpt-listing {
                 margin: -4px 0 8px; padding: 5px 8px;
                 background: #fff7e6; border: 1px solid #f0c987; border-radius: 4px;
@@ -2341,6 +2830,23 @@
                 white-space: nowrap; max-width: 90%;
             }
             #${CONFIG.uiPanelId} .jpt-toast.show { opacity: 1; }
+            /* "Track price" button placed under the wishlist heart. */
+            .jpt-add-col {
+                display: flex; flex-direction: column; align-items: center;
+                gap: 6px; flex: 0 0 auto;
+            }
+            .jpt-add-col #wishlist { margin: 0; }
+            .jpt-add-track {
+                display: inline-flex; align-items: center; justify-content: center; gap: 4px;
+                padding: 5px 9px; border: 1px solid #e0a300; border-radius: 6px;
+                background: #fff6df; color: #7a4a00; cursor: pointer;
+                font: 700 11px/1.2 system-ui, -apple-system, sans-serif;
+                white-space: nowrap; box-shadow: 0 1px 2px rgba(0,0,0,.06);
+            }
+            .jpt-add-track:hover { background: #ffefc4; border-color: #c98f00; }
+            .jpt-add-track:active { transform: translateY(1px); }
+            .jpt-add-track.tracked { background: #e7f6ec; border-color: #bfe6cb; color: #0f7434; }
+            .jpt-add-track .jpt-add-ico { font-size: 12px; line-height: 1; }
         `);
 
         // ── Movable panel: drag the header, remember the position ──
@@ -2449,10 +2955,28 @@
         }
 
         const toast = panel.querySelector('.jpt-toast');
+        const showToast = (msg, ms = 2200) => {
+            if (!toast) return;
+            toast.textContent = msg;
+            toast.classList.add('show');
+            setTimeout(() => toast.classList.remove('show'), ms);
+        };
+        panel.__showToast = showToast;
         panel.querySelector('.jpt-close').addEventListener('click', closePanel);
         panel.querySelector('.jpt-refresh').addEventListener('click', () => {
             const r = recordPrice(); updatePanel(r); updateTrackedBadge();
+            if (r) checkCheaperAlts(getProductKey());
         });
+        const altsCb = panel.querySelector('.jpt-alts-cb');
+        if (altsCb) {
+            altsCb.addEventListener('change', () => {
+                setCheaperAltsEnabled(altsCb.checked);
+                syncAltsToggles();
+                renderAltPanel();
+                if (altsCb.checked) checkCheaperAlts(getProductKey());
+            });
+        }
+        renderAltPanel();
         panel.querySelector('.jpt-find-coupons').addEventListener('click', async () => {
             const b = panel.querySelector('.jpt-find-coupons');
             b.textContent = 'Searching…'; b.disabled = true;
@@ -2496,18 +3020,89 @@
         });
     }
 
+    // ── "Track price" button under the Jumia wishlist heart ───────
+    function syncTrackButton() {
+        const btn = document.querySelector('.jpt-add-track');
+        if (!btn) return;
+        const tracked = !!loadHistory()[getProductKey()];
+        btn.classList.toggle('tracked', tracked);
+        const txt = btn.querySelector('.jpt-add-txt');
+        if (txt) txt.textContent = tracked ? 'Tracked — open' : 'Track price';
+        btn.title = tracked
+            ? 'Already in your price tracker — click to open the dashboard'
+            : 'Add this product to your price tracker';
+    }
+
+    function onAddTrackClick() {
+        const key = getProductKey();
+        let panelResult = null;
+        if (!loadHistory()[key]) {
+            panelResult = recordPrice();
+            if (panelResult) {
+                updatePanel(panelResult);
+                updateTrackedBadge();
+                checkCheaperAlts(key);
+            } else {
+                const panel = document.getElementById(CONFIG.uiPanelId);
+                if (panel && panel.__showToast)
+                    panel.__showToast('Price not found yet — wait a moment and try again.');
+                return;
+            }
+        }
+        syncTrackButton();
+        openTrackedModal();
+    }
+
+    function initTrackButton() {
+        if (SITE.id !== 'jumia' || !isProductPage()) return;
+        if (document.querySelector('.jpt-add-track')) { syncTrackButton(); return; }
+        const wish = document.querySelector('#wishlist') ||
+            document.querySelector('a[data-track-onclick="wishlist"]');
+        if (!wish || !wish.parentElement) return;
+
+        const col = document.createElement('div');
+        col.className = 'jpt-add-col';
+        wish.parentElement.insertBefore(col, wish);
+        col.appendChild(wish);
+
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'jpt-add-track';
+        btn.innerHTML = '<span class="jpt-add-ico">💰</span><span class="jpt-add-txt">Track price</span>';
+        btn.addEventListener('click', onAddTrackClick);
+        col.appendChild(btn);
+        syncTrackButton();
+    }
+
     function updateTrackedBadge() {
         const el = document.querySelector(`#${CONFIG.uiPanelId} .jpt-tracked-count`);
         if (el) el.textContent = Object.keys(loadHistory()).length;
+        syncTrackButton();
     }
     function updatePanel(result) {
         const panel = document.getElementById(CONFIG.uiPanelId);
         if (!panel) return;
         const cur = panel.querySelector('.jpt-current');
         const st = panel.querySelector('.jpt-stats');
+        const fulfilmentEl = panel.querySelector('.jpt-fulfilment');
         const listingEl = panel.querySelector('.jpt-listing');
         const nameEl = panel.querySelector('.jpt-product-name');
         const thumbEl = panel.querySelector('.jpt-thumb');
+        const renderFulfilment = f => {
+            if (!fulfilmentEl) return;
+            const info = SITE.id === 'jumia' ? fulfilmentInfo(f) : null;
+            if (!info) {
+                fulfilmentEl.hidden = true;
+                fulfilmentEl.textContent = '';
+                fulfilmentEl.className = 'jpt-fulfilment';
+                fulfilmentEl.removeAttribute('title');
+                return;
+            }
+            fulfilmentEl.hidden = false;
+            fulfilmentEl.className = `jpt-fulfilment ${info.cls}`;
+            fulfilmentEl.textContent = info.text;
+            fulfilmentEl.title = info.title;
+        };
         const hideListing = () => {
             if (!listingEl) return;
             listingEl.hidden = true;
@@ -2519,13 +3114,16 @@
             st.textContent = '';
             if (nameEl) nameEl.textContent = '';
             setThumb(thumbEl, '');
+            renderFulfilment(null);
             hideListing();
+            renderAltPanel();
             return;
         }
         const { product, dropPercent, info } = result;
         const curCode = info.currency || product.currency || SITE.currency;
         if (nameEl) nameEl.textContent = displayName(product.url || '', product);
         setThumb(thumbEl, product.image, product.name);
+        renderFulfilment(product.fulfilment);
         cur.textContent = `Current: ${formatMoney(info.price, curCode)}`;
         if (info.oldPrice) cur.textContent += `  (was ${formatMoney(info.oldPrice, curCode)})`;
         const base = priceBaseline(product);
@@ -2548,6 +3146,7 @@
             listingEl.title = 'The product name or URL changed at the same time as an implausible price jump, ' +
                 'so earlier samples belong to a different listing. They are kept in the dashboard history.';
         } else hideListing();
+        renderAltPanel();
     }
 
     function renderCoupons() {
@@ -2717,6 +3316,10 @@
                         <input type="checkbox" class="jtm-watch-cb">
                         <span>Smart watch</span>
                     </label>
+                    <label class="jtm-watch-toggle jtm-alts-toggle" title="Look for the same product listed cheaper by another Jumia seller. One search per product, at most twice a day.">
+                        <input type="checkbox" class="jtm-alts-cb">
+                        <span>💸 Cheaper</span>
+                    </label>
                     <span class="jtm-watch-status">Off</span>
                     <button class="jtm-watch-now" disabled>Check now</button>
                 </div>
@@ -2884,6 +3487,27 @@
                 letter-spacing: .3px;
             }
             #${CONFIG.trackedModalId} .jtm-tag.ali { background: #ff4747; }
+            #${CONFIG.trackedModalId} .jtm-fship {
+                flex: 0 0 auto; display: inline-block;
+                font-size: 9px; font-weight: 700; font-family: system-ui, sans-serif;
+                border-radius: 3px; padding: 1px 4px; margin-right: 5px;
+                letter-spacing: .2px; white-space: nowrap;
+            }
+            #${CONFIG.trackedModalId} .jtm-fship.express {
+                color: #0f7434; background: #e7f6ec; border: 1px solid #bfe6cb;
+            }
+            #${CONFIG.trackedModalId} .jtm-fship.abroad {
+                color: #2456a6; background: #eaf1ff; border: 1px solid #cfdcff;
+            }
+            #${CONFIG.trackedModalId} .jtm-fship.local {
+                color: #666; background: #f3f3f3; border: 1px solid #ddd;
+            }
+            #${CONFIG.trackedModalId} .jtm-flag.alt {
+                position: relative; z-index: 2;
+                color: #8a5a00; background: #fff4d6; border: 1px solid #efd39a;
+                font-family: system-ui, sans-serif; font-weight: 700; text-decoration: none;
+            }
+            #${CONFIG.trackedModalId} .jtm-flag.alt:hover { background: #ffeab4; text-decoration: underline; }
             #${CONFIG.trackedModalId} .jtm-flag {
                 flex: 0 0 auto; display: inline-block;
                 font-size: 9px; font-weight: 700; font-family: ui-monospace, Menlo, monospace;
@@ -3350,6 +3974,13 @@
 
         const watchCb = modal.querySelector('.jtm-watch-cb');
         watchCb.addEventListener('change', () => setSwEnabled(watchCb.checked));
+        const altsCb = modal.querySelector('.jtm-alts-cb');
+        if (altsCb) altsCb.addEventListener('change', () => {
+            setCheaperAltsEnabled(altsCb.checked);
+            syncAltsToggles();
+            renderAltPanel();
+            if (altsCb.checked && isProductPage()) checkCheaperAlts(getProductKey());
+        });
         const watchNow = modal.querySelector('.jtm-watch-now');
         watchNow.addEventListener('click', async () => {
             watchNow.disabled = true;
@@ -3575,6 +4206,22 @@
                 const targetText = target != null ? formatMoney(target, code) : '🎯 set';
                 const moved = r.recentChange ? r.moved : null;
                 const listing = r.listingRecent;
+                const fulfil = !isAli ? fulfilmentInfo(r.p.fulfilment) : null;
+                const fulfilFlag = fulfil
+                    ? `<span class="jtm-fship ${fulfil.cls}" title="${escapeHtml(fulfil.title)}">${fulfil.text}</span>`
+                    : '';
+                const altBest = !isAli && r.p.alts ? r.p.alts.best : null;
+                let altFlag = '';
+                if (altBest && r.cur != null) {
+                    const saving = r.cur - altBest.price;
+                    const pct = r.cur > 0 ? (saving / r.cur) * 100 : 0;
+                    if (saving >= CONFIG.alts.minSavingAmount && pct >= CONFIG.alts.minSavingPercent) {
+                        const altTitle = `Cheaper alternative: ${altBest.name} — ${formatMoney(altBest.price, code)} ` +
+                            `(save ${formatMoney(saving, code)}${altBest.express ? ', Jumia Express' : ''})`;
+                        altFlag = `<a class="jtm-flag alt" href="${escapeHtml(altBest.url)}" target="_blank" ` +
+                            `rel="noopener" title="${escapeHtml(altTitle)}">💸 -${pct.toFixed(0)}%</a>`;
+                    }
+                }
                 const movedDir = moved && moved.pct < 0 ? 'down' : 'up';
                 const movedFlag = listing
                     ? `<span class="jtm-flag listing" title="Likely seller edit detected ${timeAgo(r.p.listingChangedAt)}: an implausible price jump coincided with a changed name/URL. Open the price history for details.">⚠ listing</span>`
@@ -3597,6 +4244,8 @@
                             }</span>
                             <span class="jtm-name-main">
                                 <span class="jtm-tag ${isAli ? 'ali' : ''}">${tag}</span>
+                                ${fulfilFlag}
+                                ${altFlag}
                                 ${movedFlag}
                                 <span class="jtm-name-text">${escapeHtml(truncate(label, 60))}</span>
                             </span>
@@ -3680,6 +4329,7 @@
                 if (r.listing) log('Listing changed for', key, '(old prices kept in history).');
                 updatePanel(r); updateTrackedBadge();
                 if (!r.listing) notifyDrop(r);
+                checkCheaperAlts(key);
             } else if (attempts < CONFIG.extractAttempts) {
                 setTimeout(tryExtract, CONFIG.extractDelayMs);
             } else {
@@ -3704,6 +4354,7 @@
             if (!isProductPage()) return;
             if (getProductKey() === lastTrackedKey) return; // same product, don't duplicate samples
             trackCurrentPage();
+            initTrackButton();
         }, 2000);
     }
 
@@ -3738,6 +4389,7 @@
         log('Product page:', SITE.id, getProductKey());
 
         trackCurrentPage();
+        initTrackButton();
 
         setInterval(() => {
             scanCurrentPageForCoupons();
