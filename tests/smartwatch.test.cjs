@@ -450,6 +450,7 @@ test('background price change updates and highlights the open dashboard', async 
     const sortSel = doc.querySelector('.jtm-sort');
     sortSel.value = 'changed';
     sortSel.dispatchEvent(new env.win.Event('change'));
+    await runDue(env, 200); // flush the debounced search render
 
     // Second tick changes beta (80 → 70); state must be preserved.
     await runDue(env, 7 * 60 * 1000);
@@ -673,11 +674,12 @@ test('mini panel can be dragged and remembers its position', async () => {
     assert.strictEqual(JSON.parse(env.store.get('jumia_gh_panel_pos')).x, 150, 'x persisted');
     assert.strictEqual(JSON.parse(env.store.get('jumia_gh_panel_pos')).y, 120, 'y persisted');
 
-    // Dragging past the edge clamps the panel inside the viewport.
+    // Dragging past the edge keeps a grabbable strip (60 px) on screen
+    // rather than forcing the whole panel inside the viewport.
     header.dispatchEvent(ptr('pointerdown', 150, 120));
     env.win.dispatchEvent(ptr('pointermove', 5000, 5000));
-    assert.strictEqual(panel.style.left, '670px', 'clamped to the right edge');
-    assert.strictEqual(panel.style.top, '400px', 'clamped to the bottom edge');
+    assert.strictEqual(panel.style.left, '940px', '60 px of the panel kept on the right');
+    assert.strictEqual(panel.style.top, '640px', '60 px of the panel kept at the bottom');
     env.win.dispatchEvent(ptr('pointerup', 5000, 5000));
 
     // Closing keeps the position for the next page load.
@@ -692,8 +694,8 @@ test('mini panel can be dragged and remembers its position', async () => {
     assert(panel2, 'panel recreated');
     // Layout runs on open, so re-read the saved value through a resize tick.
     env2.win.dispatchEvent(new env2.win.Event('resize'));
-    assert.strictEqual(panel2.style.left, '670px', 'saved x restored');
-    assert.strictEqual(panel2.style.top, '400px', 'saved y restored');
+    assert.strictEqual(panel2.style.left, '940px', 'saved x restored');
+    assert.strictEqual(panel2.style.top, '640px', 'saved y restored');
 
     // Double-clicking the header resets it to the default corner.
     panel2.querySelector('.jpt-header').dispatchEvent(
@@ -1000,7 +1002,7 @@ test('ranking prefers relevant usable codes and purges junk on startup', async (
 });
 
 // ── 20. Cheaper alternatives: conservative matching + Express badge ────
-test('finds a cheaper same-product listing and rejects accessories, wrong capacity and other brands', async () => {
+test('finds a cheaper same-product listing and rejects accessories and chargers', async () => {
     const url = 'https://www.jumia.com.gh/current-product.html';
     const name = 'Oraimo Traveler 15 Power Bank 20000mAh 15W Type-C Fast Charging with LED Torch';
     const search = searchPage([
@@ -1013,16 +1015,6 @@ test('finds a cheaper same-product listing and rejects accessories, wrong capaci
             url: '/oraimo-traveler-15-power-bank-case-cover-300000002.html',
             name: 'Oraimo Traveler 15 Power Bank Case Cover 20000mAh',
             price: 20, brand: 'Oraimo',
-        },
-        {
-            url: '/oraimo-traveler-15-power-bank-10000mah-300000003.html',
-            name: 'Oraimo Traveler 15 Power Bank 10000mAh 15W Type-C',
-            price: 90, brand: 'Oraimo',
-        },
-        {
-            url: '/anker-power-bank-20000mah-300000004.html',
-            name: 'Anker Power Bank 20000mAh 15W Type-C Fast Charging',
-            price: 80, brand: 'Anker',
         },
         {
             url: '/oraimo-15w-fast-charger-300000005.html',
@@ -1055,6 +1047,7 @@ test('finds a cheaper same-product listing and rejects accessories, wrong capaci
             : { status: 200, text: pdp(200, name, { brand: 'Oraimo', express: true }) },
     });
     await runDue(env, 2000);
+    await runDue(env, 500); // the second (wider) query is spaced 400 ms apart
     await flush(20);
 
     const h = loadJSON(env, HISTORY_KEY);
@@ -1064,22 +1057,105 @@ test('finds a cheaper same-product listing and rejects accessories, wrong capaci
     assert.strictEqual(product.alts.best.price, 140, 'cheapest compatible listing wins');
     assert(/300000008/.test(product.alts.best.url), 'right product chosen (comma-separated capacity)');
     assert.strictEqual(product.alts.best.express, false, 'non-Express alternative is honest');
+    assert.strictEqual(product.alts.best.similar, false, 'an exact same-product match is not labelled similar');
     assert.strictEqual(product.alts.items.find(i => /300000001/.test(i.url)).express, true,
         'Express flag carried through for the Express alternative');
     assert(product.alts.checkedAt, 'check timestamp stored');
-    assert(!product.alts.items.some(i => /case-cover|10000mah|anker|charger|phone-case/.test(i.url)),
-        'accessory, capacity mismatch, other brand and charger rejected');
+    assert(product.alts.v === 2, 'matcher version stored so older caches re-run');
+    assert(product.alts.items.every(i => !i.similar), 'all stored items are exact matches');
+    assert(!product.alts.items.some(i => /case-cover|charger|phone-case/.test(i.url)),
+        'accessory, charger and phone case rejected');
 
     const panel = env.win.document.getElementById('price-tracker-panel');
     assert(/⚡ Jumia Express/.test(panel.querySelector('.jpt-fulfilment').textContent), 'PDP shows Express');
-    const altsText = panel.querySelector('.jpt-alts-body').textContent;
-    assert(/140\.00/.test(altsText), 'panel shows the cheaper price');
-    assert(/−30%/.test(altsText), 'panel shows the saving');
-    assert(env.requests.some(r => /\/catalog\/\?q=/.test(r.url)), 'one catalog search made');
+    const light = panel.querySelector('.jpt-light');
+    assert(light && !light.hidden, 'panel shows the cheaper-listing light');
+    assert(/140\.00/.test(light.title), 'light tooltip carries the cheaper price');
+
+    await openDashboard(env);
+    const doc = env.win.document;
+    doc.querySelector('.jtm-hist[data-key="current-product"]').click();
+    await flush();
+    const altRows = [...doc.querySelectorAll('.jtm-alt')];
+    assert.strictEqual(altRows.length, 3, 'all three exact listings listed');
+    assert(altRows.some(r => /300000008/.test(r.querySelector('.jtm-alt-name').getAttribute('href')) &&
+        /140\.00/.test(r.textContent)), 'cheapest exact item shown in the dashboard');
+    assert(!altRows.some(r => /similar/.test(r.textContent)), 'exact matches have no similar badge');
+    assert(env.requests.some(r => /\/catalog\/\?q=/.test(r.url)), 'catalog search made');
 
     assert.strictEqual(env.win.__notifications.length, 1, 'one cheaper-alternative notification');
     assert(/Cheaper alternative/.test(env.win.__notifications[0].title), 'notification title');
     assert(/Save GH₵ 60\.00 \(30%\)/.test(env.win.__notifications[0].text), 'notification text has the saving');
+});
+
+// ── 20b. Similar products from other brands (the three USB chargers) ───
+test('similar USB battery chargers from other brands are offered as similar', async () => {
+    const url = 'https://www.jumia.com.gh/shebsheb-1piece-4bay-usb-battery-charger-300681807.html';
+    const name = 'Shebsheb 1Piece 4Bay USB Battery Charger Universal AA/AAA NiMH NiCd Rechargeable Battery Charger with LED Indicator';
+    const generic = {
+        url: '/generic-4-slot-usb-intelligent-battery-charger-300625276.html',
+        name: 'Generic 4 Slot USB Intelligent Battery Charger 18 650 Lithium Battery Single Charging Intelligent USB Charging Box Suitable for 21700 and 14500 Lithium Batteries',
+        price: 95, brand: 'Generic',
+    };
+    const zarsyn = {
+        url: '/zarsyn-4-slot-smart-usb-charger-300590769.html',
+        name: 'Zarsyn 4 Slot Smart USB Charger Fast Charging for AA AAA Lithium BatteriesBatteries Not Included',
+        price: 89, brand: 'Zarsyn',
+    };
+    const search = searchPage([
+        generic,
+        zarsyn,
+        {
+            url: '/usb-type-c-fast-charging-cable-300000009.html',
+            name: 'USB Type-C Fast Charging Cable 2m',
+            price: 20, brand: 'Generic',
+        },
+        {
+            url: '/rechargeable-aa-aaa-batteries-300000010.html',
+            name: 'Rechargeable AA AAA Batteries 4 Pack 2000mAh',
+            price: 30, brand: 'Generic',
+        },
+    ]);
+
+    const env = await makeEnv({
+        url,
+        html: pdp(120, name, { brand: 'Shebsheb' }),
+        storage: { jumia_gh_coupons_last_fetch: realNow },
+        responses: u => u.includes('/catalog/?q=')
+            ? { status: 200, text: search }
+            : { status: 200, text: pdp(120, name, { brand: 'Shebsheb' }) },
+    });
+    await runDue(env, 2000);
+    await runDue(env, 500);
+    await flush(20);
+
+    const product = Object.values(loadJSON(env, HISTORY_KEY))[0];
+    const items = product.alts.items;
+    assert.strictEqual(items.length, 2, 'the two other chargers match; the cable and cells do not');
+    const g = items.find(i => /300625276/.test(i.url));
+    const z = items.find(i => /300590769/.test(i.url));
+    assert(g && z, 'both cited charger listings found across brands');
+    assert.strictEqual(g.similar, true, 'Generic charger marked similar');
+    assert.strictEqual(z.similar, true, 'Zarsyn charger marked similar');
+    assert.strictEqual(product.alts.best.price, 89, 'cheapest similar charger is the best offer');
+    assert(/300590769/.test(product.alts.best.url), 'best offer is the Zarsyn listing');
+    assert(!items.some(i => /cable|batteries-300000010/.test(i.url)), 'cable and bare cells rejected');
+
+    const light = env.win.document.querySelector('.jpt-light');
+    assert(light && !light.hidden, 'panel light shown for the cheaper similar listing');
+    assert(/Cheaper similar item/.test(light.title), 'light explains that the match is similar');
+
+    assert.strictEqual(env.win.__notifications.length, 1, 'one notification');
+    assert(/Cheaper similar item on Jumia/.test(env.win.__notifications[0].title), 'similar notification title');
+    assert(/Similar product, different brand\/model/.test(env.win.__notifications[0].text), 'similar caveat included');
+
+    await openDashboard(env);
+    const doc = env.win.document;
+    doc.querySelector('.jtm-hist[data-key="shebsheb-1piece-4bay-usb-battery-charger-300681807"]').click();
+    await flush();
+    const rows = [...doc.querySelectorAll('.jtm-alt')];
+    assert.strictEqual(rows.length, 2, 'both similar listings in the dashboard');
+    assert(rows.every(r => /similar/.test(r.textContent)), 'each row carries the similar badge');
 });
 
 // ── 21. The feature is opt-out and the toggle takes effect immediately ─
@@ -1103,19 +1179,22 @@ test('cheaper alternatives can be turned off and on from the dashboard', async (
 
     assert.strictEqual(env.requests.filter(r => /\/catalog\/\?q=/.test(r.url)).length, 0,
         'no search while the feature is off');
-    assert(/Off — turn on/.test(env.win.document.querySelector('.jpt-alts-body').textContent),
-        'panel explains that the feature is off');
+    assert(env.win.document.querySelector('.jpt-light').hidden, 'panel light stays hidden while the feature is off');
 
     await openDashboard(env);
     const cb = env.win.document.querySelector('.jtm-alts-cb');
     assert(cb && !cb.checked, 'dashboard checkbox starts off');
     cb.checked = true;
     cb.dispatchEvent(new env.win.Event('change'));
+    await flush(10);
+    for (let i = 0; i < 4; i++) await runDue(env, 500); // two spaced catalogue queries
     await flush(20);
 
     assert.strictEqual(env.store.get(ALTS_KEY), true, 'choice stored');
-    assert(env.requests.filter(r => /\/catalog\/\?q=/.test(r.url)).length >= 1, 'turning it on starts a search');
+    assert(env.requests.filter(r => /\/catalog\/\?q=/.test(r.url)).length >= 1,
+        'turning it on starts a catalogue search');
     assert(env.win.document.querySelector('.jtm-flag.alt'), 'dashboard now shows the cheaper badge');
+    assert(!env.win.document.querySelector('.jpt-light').hidden, 'panel light turns on with the feature');
 });
 
 // ── 22. One cheaper-alternative notification per product per day ───────
@@ -1151,6 +1230,7 @@ test('cheaper-alternative notification respects the 24h cooldown', async () => {
             : { status: 200, text: pdp(200, name, { brand: 'Oraimo' }) },
     });
     await runDue(env, 2000);
+    await runDue(env, 500);
     await flush(20);
 
     assert(env.requests.some(r => /\/catalog\/\?q=/.test(r.url)), 'stale check still runs');
@@ -1191,7 +1271,9 @@ test('the Track price button sits under wishlist and adds the product', async ()
     const col = btn.parentElement;
     assert(col.classList.contains('jpt-add-col'), 'button in the wishlist column');
     assert.strictEqual(col.querySelector('#wishlist').parentElement, col, 'wishlist moved into the column');
-    assert(/Track price/.test(btn.textContent), 'initial label');
+    assert(btn.querySelector('.jpt-add-ico svg'), 'price-tag icon injected');
+    assert.strictEqual(btn.textContent.trim(), '', 'the control is an icon only, with no text');
+    assert.strictEqual(btn.getAttribute('aria-label'), 'Track price', 'accessible label for the icon');
 
     btn.click();
     await flush(10);
@@ -1199,7 +1281,10 @@ test('the Track price button sits under wishlist and adds the product', async ()
     const key = 'track-me';
     assert(loadJSON(env, HISTORY_KEY)[key], 'product added to the stored list');
     assert(doc.getElementById('price-tracker-modal'), 'dashboard opens after adding');
-    assert(/Tracked — open/.test(doc.querySelector('.jpt-add-track').textContent), 'button reflects the tracked state');
+    const after = doc.querySelector('.jpt-add-track');
+    assert(after.classList.contains('tracked'), 'button reflects the tracked state');
+    assert.strictEqual(after.getAttribute('aria-label'), 'Tracked — open dashboard', 'tracked accessible label');
+    assert.strictEqual(after.textContent.trim(), '', 'still icon only after tracking');
 });
 
 // ── 25. Listing cards get their own button under the heart ─────────────
@@ -1223,7 +1308,9 @@ test('a product card on a listing page gets a track button that adds it', async 
     const btn = col.querySelector('.jpt-card-track');
     assert(btn, 'card track button injected');
     assert.strictEqual(btn.dataset.key, 'oraimo-traveler-15-power-bank-20000mah-300000001', 'key from card URL');
-    assert(/Track price/.test(btn.textContent), 'untracked card label');
+    assert(btn.querySelector('.jpt-add-ico svg'), 'card button uses the price-tag icon');
+    assert.strictEqual(btn.textContent.trim(), '', 'card button is icon only');
+    assert.strictEqual(btn.getAttribute('aria-label'), 'Track price', 'card button has an accessible label');
 
     btn.click();
     await flush(15);
@@ -1237,7 +1324,9 @@ test('a product card on a listing page gets a track button that adds it', async 
     assert.strictEqual(product.fulfilment.kind, 'express', 'Express badge read from the card');
     assert(product.image == null || /^https?:/.test(product.image), 'image optional');
     assert(doc.getElementById('price-tracker-modal'), 'dashboard opens after adding from a card');
-    assert(/Tracked — open/.test(doc.querySelector('.jpt-card-track').textContent), 'card label flips');
+    const after = doc.querySelector('.jpt-card-track');
+    assert(after.classList.contains('tracked'), 'card button flips to tracked');
+    assert.strictEqual(after.getAttribute('aria-label'), 'Tracked — open dashboard', 'tracked card label');
 });
 
 // ── 26. A tracked card opens the dashboard without duplicating a sample ─
@@ -1261,7 +1350,8 @@ test('clicking an already tracked card opens the dashboard and adds no sample', 
 
     const doc = env.win.document;
     const btn = doc.querySelector('.jpt-card-track');
-    assert(btn && /Tracked — open/.test(btn.textContent), 'tracked card shows the state immediately');
+    assert(btn && btn.classList.contains('tracked'), 'tracked card shows the state immediately');
+    assert.strictEqual(btn.getAttribute('aria-label'), 'Tracked — open dashboard', 'tracked card has an accessible label');
 
     btn.click();
     await flush(10);
@@ -1300,9 +1390,122 @@ test('infinite-scroll cards are picked up by the debounced rescan', async () => 
         'its key comes from its own URL');
 });
 
+// ── 28. Dashboard direction filter persists like the sort choice ────────
+test('dashboard price-direction filter persists across reopen', async () => {
+    const history = {
+        'down-product': {
+            name: 'Down Product', url: 'https://www.jumia.com.gh/down-product.html',
+            site: 'jumia', currency: 'GHS', created: realNow - 9 * DAY,
+            samples: [{ p: 100, t: realNow - 2 * DAY }, { p: 90, t: realNow - HOUR }],
+        },
+        'up-product': {
+            name: 'Up Product', url: 'https://www.jumia.com.gh/up-product.html',
+            site: 'jumia', currency: 'GHS', created: realNow - 9 * DAY,
+            samples: [{ p: 100, t: realNow - 2 * DAY }, { p: 110, t: realNow - HOUR }],
+        },
+        'flat-product': {
+            name: 'Flat Product', url: 'https://www.jumia.com.gh/flat-product.html',
+            site: 'jumia', currency: 'GHS', created: realNow - 9 * DAY,
+            samples: [{ p: 100, t: realNow - 2 * DAY }, { p: 100, t: realNow - HOUR }],
+        },
+    };
+    const env = await makeEnv({
+        storage: { ...seedHistory(history), jumia_gh_coupons_last_fetch: realNow },
+    });
+    await openDashboard(env);
+    const doc = env.win.document;
+    const names = () => [...doc.querySelectorAll('.jtm-row .jtm-name-text')].map(e => e.textContent);
+
+    const filter = doc.querySelector('.jtm-filter');
+    assert(filter, 'direction filter exists');
+    filter.value = 'down';
+    filter.dispatchEvent(new env.win.Event('change'));
+    await flush();
+    assert.deepStrictEqual(names(), ['Down Product'], 'only reduced products shown');
+    assert.strictEqual(env.store.get('jumia_gh_dash_filter'), 'down', 'filter choice saved');
+
+    doc.querySelector('.jtm-close').click();
+    await flush();
+    await openDashboard(env);
+    assert.strictEqual(doc.querySelector('.jtm-filter').value, 'down', 'filter restored on reopen');
+    assert.deepStrictEqual(names(), ['Down Product'], 'restored filter applied');
+
+    const again = doc.querySelector('.jtm-filter');
+    again.value = 'up';
+    again.dispatchEvent(new env.win.Event('change'));
+    await flush();
+    assert.deepStrictEqual(names(), ['Up Product'], 'rises only');
+    assert.strictEqual(env.store.get('jumia_gh_dash_filter'), 'up', 'new filter saved');
+});
+
+// ── 29. Deal check: inflated "was" price + set target to the low ───────
+test('dashboard deal check warns about an inflated was price and sets a low target', async () => {
+    const key = 'deal-product';
+    const samples = [
+        { p: 120, t: realNow - 10 * DAY },
+        { p: 130, t: realNow - 8 * DAY },
+        { p: 110, t: realNow - 6 * DAY },
+        { p: 100, t: realNow - 4 * DAY },
+        { p: 95, t: realNow - 2 * DAY },
+        { p: 100, op: 200, t: realNow - HOUR },
+    ];
+    const history = {
+        [key]: {
+            name: 'Deal Check Product', url: 'https://www.jumia.com.gh/deal-product.html',
+            site: 'jumia', currency: 'GHS', created: realNow - 11 * DAY,
+            target: 90, samples,
+        },
+    };
+    const env = await makeEnv({
+        storage: { ...seedHistory(history), jumia_gh_coupons_last_fetch: realNow },
+    });
+    await openDashboard(env);
+    const doc = env.win.document;
+
+    assert(doc.querySelector('.jtm-sort option[value="deal"]'), 'Best deals sort is available');
+    doc.querySelector(`.jtm-hist[data-key="${key}"]`).click();
+    await flush();
+
+    const deal = doc.querySelector('.jtm-deal');
+    assert(deal, 'deal box rendered');
+    assert(deal.classList.contains('good'), 'price judged below its average');
+    assert(/Below its average price/.test(deal.textContent), 'deal wording');
+    assert(/Avg .*109\.17/.test(deal.textContent), 'average shown');
+    const warn = deal.querySelector('.jtm-deal-warn');
+    assert(warn, 'inflated was-price warning rendered');
+    assert(/200\.00/.test(warn.textContent), 'claimed was price shown');
+    assert(/highest seen .*130\.00/.test(warn.textContent), 'highest recorded price shown');
+
+    const chart = doc.querySelector('.jtm-chart').innerHTML;
+    assert(/🎯 target/.test(chart), 'target reference line drawn');
+    assert(/avg/.test(chart), 'average reference line drawn');
+
+    const lowBtn = doc.querySelector('.jtm-lowtarget');
+    assert(lowBtn && /95\.00/.test(lowBtn.textContent), 'offer to set the target to the recorded low');
+    lowBtn.click();
+    await flush();
+    assert.strictEqual(loadJSON(env, HISTORY_KEY)[key].target, 95, 'low target stored');
+    assert(!doc.querySelector('.jtm-lowtarget'), 'button disappears once the target equals the low');
+});
+
+// ── 30. Corrupt history is backed up before anything overwrites it ─────
+test('unreadable stored history is copied to a recovery key', async () => {
+    const raw = '{"broken":';
+    const env = await makeEnv({
+        storage: { [HISTORY_KEY]: raw, jumia_gh_coupons_last_fetch: realNow },
+    });
+    await flush();
+
+    assert.strictEqual(env.store.get(HISTORY_KEY + '_corrupt_backup'), raw,
+        'raw unreadable value kept for recovery');
+    assert(env.win.document.getElementById('price-tracker-panel'), 'script still starts normally');
+});
+
 (async () => {
+    const only = process.env.ONLY;
+    const selected = only ? tests.filter(t => t.name.includes(only)) : tests;
     let failed = 0;
-    for (const t of tests) {
+    for (const t of selected) {
         try {
             await t.fn();
             console.log('PASS  ' + t.name);
@@ -1312,6 +1515,6 @@ test('infinite-scroll cards are picked up by the debounced rescan', async () => 
             console.error('      ' + (e && e.stack ? e.stack.split('\n').slice(0, 4).join('\n      ') : e));
         }
     }
-    console.log(`\n${tests.length - failed}/${tests.length} passed`);
+    console.log(`\n${selected.length - failed}/${selected.length} passed`);
     process.exit(failed ? 1 : 0);
 })();

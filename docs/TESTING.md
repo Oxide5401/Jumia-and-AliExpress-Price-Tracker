@@ -39,7 +39,12 @@ npm install jsdom
 node tests/smartwatch.test.cjs
 ```
 
-The suite runs 28 jsdom cases with no network access. It prints `PASS`/`FAIL` per case and exits non-zero on the first failure.
+The suite runs **32 jsdom cases** with no network access. It prints `PASS`/`FAIL` per case and exits non-zero if any case fails. Set `ONLY` to run a subset by name:
+
+```bash
+node tests/smartwatch.test.cjs
+ONLY="similar USB" node tests/smartwatch.test.cjs
+```
 
 ```js
 const fs = require('fs');
@@ -123,7 +128,9 @@ These are the assertions worth keeping when changing extraction, storage, or UI.
 ### Storage
 - `recordPrice` creates a product with `name`, `url`, `site`, `currency`, `image`, and one sample.
 - A second record appends a sample and updates `image` only when a new URL exists.
-- Retention caps at 120 samples; `saveHistory` caps at 200 products, newest final sample first.
+- Retention caps at 120 samples; `saveHistory` caps at 5,000 products, newest final sample first.
+- `peekHistory()` caches the parsed object until the stored string changes and is safe for repeated read-only lookups; `loadHistory()` returns an independent copy.
+- An unreadable stored history is copied verbatim to `jumia_gh_price_history_corrupt_backup` and the script still starts with an empty view.
 - `mergeHistoryData` appends only unseen timestamps, preserves the earliest `created`, fills missing fields, ignores garbage, and never deletes.
 
 ### Images
@@ -139,6 +146,8 @@ These are the assertions worth keeping when changing extraction, storage, or UI.
 - Panel shows the product name and thumbnail after `updatePrice`/tracking.
 - Dashboard lists all products, filters by name, and sorts by recent changes/recent/drop/rise/price/name.
 - Choosing a sort writes `jumia_gh_dash_sort`, closing and reopening the dashboard restores the same choice and ordering, and an invalid stored value falls back to **Recent**.
+- Choosing a direction filter writes `jumia_gh_dash_filter`, filters to ±0.05% movers, and is restored on reopen.
+- Dashboard search is debounced: typing does not rebuild the list on every keystroke, and the final query filters correctly.
 - Site tags render correctly (`Jumia` grey, `AliExpress` red).
 - Export produces parseable JSON; Import → Merge reports the correct product/sample counts.
 - Under hostile CSS (`a { color: transparent !important; -webkit-text-fill-color: transparent !important }`), names, tags, and the footer buttons remain visible.
@@ -148,10 +157,12 @@ These are the assertions worth keeping when changing extraction, storage, or UI.
 - The dashboard exposes `.jtm-min`, `.jtm-max-btn`, `.jtm-close`, `.jtm-snap`, and `.jtm-resize`. Dragging within `SNAP_PX` of an edge snaps flush and adds `.jtm-snapped`; Alt bypasses snapping; the 🧲 toggle disables it.
 - Maximize fills the viewport, restore returns to the previous rectangle, minimize collapses to the title bar, and closing removes the modal.
 - Dragging/resizing persists `{ x, y, w, h, max, snap }` to `jumia_gh_dash_window`; reopening restores it.
-- The floating panel exposes `.jpt-header`; a pointer drag sets inline `left/top`, clears `right/bottom`, and stores `{ x, y }` in `jumia_gh_panel_pos`. Dragging past an edge clamps the panel inside the viewport, a fresh load restores the saved spot, and a header double-click clears both the style and the key.
+- The floating panel exposes `.jpt-header`; a pointer drag sets inline `left/top`, clears `right/bottom`, and stores `{ x, y }` in `jumia_gh_panel_pos`. Dragging past an edge keeps a 60 px grabbable strip on screen, a fresh load restores the saved spot, and a header double-click clears both the style and the key.
 - A redirecting background fetch with a renamed, much cheaper page appends a sample carrying `lc`, sets `listingChangedAt`, updates `url` to the redirect target, renders `.jtm-row.listing` with a `⚠ listing` badge (no `↓` badge), resets the row change to `0.0%`, and sends no notification.
 - A visit whose extracted name differs sharply from the stored name adds `lc: 'name'` and shows the `.jpt-listing` warning in the panel without a drop line.
-- Opening `.jtm-hist` shows `.jtm-detail` with one chart circle per sample, one `.jtm-chg` per consecutive price move (newest first), listing markers, and a summary computed from the post-swap baseline. Back and Escape return to the list; Escape then closes the dashboard.
+- Opening `.jtm-hist` shows `.jtm-detail` with one chart circle per sample, average and target reference lines, one `.jtm-chg` per consecutive price move (newest first), listing markers, and a summary computed from the post-swap baseline. Back and Escape return to the list; Escape then closes the dashboard.
+- **Deal analysis:** a product with three samples over two days shows a `.jtm-deal` box with the correct kind, average, low, high, and `cheaper than N%`; an inflated "was" price renders `.jtm-deal-warn`; **Set target to its low** stores the low and disappears once the target equals it.
+- **Deal rows:** `🔥 low`, `👍 good`, `⏳ wait`, and `🏷 inflated` flags match `analyzeDeal`, and **Best deals** orders products by current price relative to their own average.
 
 ### Smart watch
 - **304:** a stored `ETag` is sent as `If-None-Match`; a `304` adds no sample, increments misses, and pushes `nextCheck` forward.
@@ -165,13 +176,17 @@ These are the assertions worth keeping when changing extraction, storage, or UI.
 - **Politeness:** no more than one request is in flight, `minGapMs` is respected, and 403/429 responses set `hosts[host].blockedUntil`.
 
 ### Cheaper alternatives
-- One search to `/catalog/?q=…` runs on a Jumia product page, and the cheapest compatible listing is stored as `alts.best` with `checkedAt`.
-- A same-name variant with a different capacity (`10000mAh` vs `20000mAh`), a case/cover/charger/protector, and a different brand are all rejected even when they are cheaper.
+- A Jumia product page runs the short core and wider type catalogue queries (two `/catalog/?q=…` requests, 400 ms apart), and the cheapest compatible listing is stored as `alts.best` with `checkedAt`, `v: 2`, and the queries used.
+- A same-name variant with a different capacity (`10000mAh` vs `20000mAh`), a case/cover/charger/protector, and a different brand are all rejected by the exact matcher even when they are cheaper.
+- **Similar-type fallback:** the three cited 4-slot USB chargers match across brands — the Generic `300625276` and Zarsyn `300590769` are stored with `similar: true`, the Zarsyn `GH₵ 89.00` is `best`, and a USB charging cable or a pack of bare AA/AAA cells is rejected.
+- A doubled token in a title (`BatteriesBatteries Not Included`) is collapsed before type-token comparison, so it does not hide an otherwise valid similar match.
 - Search prices come from the visible `.prc` GHS text, not `data-gtm-price`/`data-ga4-price`.
-- The panel `.jpt-alts-body` shows the alternative price, the saving percentage, and an `⚡ Express` marker when the match is Express.
-- One notification fires with "Cheaper alternative" and the saving; the 24-hour `notifiedAt` cooldown suppresses a repeat.
-- With `jumia_gh_cheaper_alts: false`, no catalogue request is made, the panel says the feature is off, and unticking/ticking the dashboard `.jtm-alts-cb` takes effect immediately (one search, then a `💸 -x%` row badge).
+- The panel shows `.jpt-light` (not a full alternatives block) only when the saving clears 3% and GH₵ 1; its tooltip/`aria-label` include the price and saving, and it opens the dashboard.
+- The detail view lists every stored alternative with price, saving, and a `similar` badge where applicable.
+- One notification fires with "Cheaper alternative" and the saving; a similar-only match uses "Cheaper similar item on Jumia" and adds `Similar product, different brand/model.` The 24-hour `notifiedAt` cooldown suppresses a repeat.
+- With `jumia_gh_cheaper_alts: false`, no catalogue request is made, the panel light stays hidden, and ticking the dashboard `.jtm-alts-cb` takes effect immediately (one search, then a `💸 -x%` row badge and the light).
 - A failed search sets `failedAt`, keeps any previous `best`, and suppresses retries for an hour.
+- **Update items** re-reads outdated Jumia entries, fills brand/image/fulfilment, stamps `dv: 3` and `refreshedAt`, and re-runs at most 20 alternative searches; AliExpress items are reported and skipped.
 
 ### Delivery badges
 - `isShopExpress: true`, `.bdg._xprs`, or a *Delivery & Returns* card containing *Jumia Express* yields `kind: 'express'` and **⚡ Jumia Express**.
@@ -181,14 +196,15 @@ These are the assertions worth keeping when changing extraction, storage, or UI.
 
 ### Track button
 - With `#wishlist` present, `.jpt-add-col` wraps the heart and `.jpt-add-track` sits below it in the same column.
-- Clicking **Track price** records the product, opens `#price-tracker-modal`, and relabels the button **Tracked — open**.
-- Clicking an already tracked product does not duplicate a sample; deleting the product from the dashboard resets the label on the next `updateTrackedBadge`.
+- The button is icon-only (price-tag SVG, empty text content), and its `aria-label` is **Track price** before tracking and **Tracked — open dashboard** after.
+- Clicking it records the product, opens `#price-tracker-modal`, and fills the icon orange.
+- Clicking an already tracked product does not duplicate a sample; deleting the product from the dashboard resets the state on the next `updateTrackedBadge`.
 - No button is injected on non-product pages or AliExpress.
-- Each `article.prd` on a listing page gets a `.jpt-card-col` at its top-right containing the original `.btn._wslt` heart and a `.jpt-card-track` button whose `data-key` is derived from the card URL.
-- Clicking a card button stores the card's name, price, brand, image (when present), and Express/abroad badge, appends exactly one `src: "card"` sample, and opens the dashboard.
-- A card whose product is already tracked shows **Tracked — open** on first render; clicking opens the dashboard with the sample count unchanged.
-- A dynamically appended `article.prd` (infinite scroll) receives a button after the 350 ms debounced scan.
-- Home, dashboard, and product pages create no card observer, and the panel's alternatives block shows the listing-page hint rather than "waiting for this page's price".
+- Each `article.prd` on a listing page gets a `.jpt-card-col` at its top-right containing the original `.btn._wslt` heart and an icon-only `.jpt-card-track` button whose `data-key` is derived from the card URL.
+- Clicking a card button stores the card's name, price, pre-discount price (when shown), brand, image (when present), and Express/abroad badge, appends exactly one `src: "card"` sample, and opens the dashboard.
+- A card whose product is already tracked shows the tracked (orange) state on first render; clicking opens the dashboard with the sample count unchanged.
+- A dynamically appended `article.prd` (infinite scroll) receives a button after the 350 ms debounced scan; a card that cannot be parsed is retried at most five times.
+- Home, dashboard, and product pages create no card observer, and the panel's current line shows the listing-page hint rather than "waiting for this page's price".
 
 ---
 
@@ -249,22 +265,27 @@ The UI must remain readable.
 - [ ] Select **Recent changes**: products with the newest real movements come first, even if a later unchanged check appended a baseline sample.
 - [ ] The change badge disappears after 7 days (temporarily lower `changeHighlightMs` to verify).
 - [ ] Simulate a seller edit (rename the product and drop the price by >98% in DevTools before **Refresh**): the row shows `⚠ listing`, `Change` restarts near 0%, and no drop notification fires. Export JSON shows `lc` on the sample and `listingChangedAt` on the product.
-- [ ] Click 📈 on a row: the chart plots every sample and the list shows each price change newest first. The listing step is marked; Back and Escape return to the list.
+- [ ] Click 📈 on a row: the chart plots every sample, draws average/target lines, and the list shows each price change newest first. The listing step is marked; Back and Escape return to the list.
+- [ ] Check the deal box: with a few days of samples it names the price position, shows average/low/high and "cheaper than N%", and offers **Set target to its low** when applicable.
 - [ ] Set a target via 🎯: badge appears; a target already met renders green and the product stops being scheduled.
+- [ ] Sort by **Best deals**: products furthest below their own average come first. Rows show `🔥 low` / `👍 good` / `⏳ wait` / `🏷 inflated` where applicable.
+- [ ] Use the **↓ Price reduced** and **↑ Price increased** filters; close and reopen the dashboard and confirm the filter is still selected.
 - [ ] Reload after a background check: the new sample survives and shows `src: "watch"` in Export JSON.
 - [ ] Leave the tab hidden: no new requests. Return to the tab: checks resume.
 - [ ] Untick **Smart watch**: no further scheduled requests.
 - [ ] Open a product: the panel shows **⚡ Jumia Express**, **✈ Ships from abroad**, or **🏬 Marketplace seller**; the same badge appears on its dashboard row.
-- [ ] Click **💰 Track price** under the wishlist heart: the product is added and the dashboard opens; the button now reads **Tracked — open**. Clicking the heart still triggers Jumia's wishlist flow.
-- [ ] On a Jumia search/category page, every product card shows a small **Track price** pill under its heart without shifting the card layout. Click one: the item is added from the card data, the dashboard opens, and that pill reads **Tracked — open**.
-- [ ] Click the same card again: the dashboard opens but the sample count does not grow. Reload the page: the pill is still **Tracked — open**.
-- [ ] Scroll to trigger more results (or apply a filter): new cards also get pills.
-- [ ] While on a listing page, the panel says to use 💰 Track on a result card rather than "waiting for this page's price".
-- [ ] Open a product with an obvious cheaper duplicate in the catalogue: the *Cheaper alternatives* block links the cheaper listing with its saving and an Express/abroad marker, and one notification fires at ≥3% and ≥GH₵ 1.
-- [ ] Untick **on** in the panel block (or **💸 Cheaper** in the dashboard): no new `/catalog/?q=` requests appear in DevTools, the block says it is off, and the `💸 -x%` row badges disappear or stop updating.
-- [ ] Re-tick the option: a search runs immediately and the row badge returns.
-- [ ] Confirm an unrelated cheaper item (a case, a different capacity, a different brand) is **not** offered as an alternative.
+- [ ] Click the price-tag button under the wishlist heart: the product is added and the dashboard opens; the icon fills orange. Hovering exposes *Track price* / *Tracked — open dashboard*. Clicking the heart still triggers Jumia's wishlist flow.
+- [ ] On a Jumia search/category page, every product card shows a small icon-only price tag under its heart without shifting the card layout. Click one: the item is added from the card data, the dashboard opens, and that tag fills orange.
+- [ ] Click the same card again: the dashboard opens but the sample count does not grow. Reload the page: the tag is still filled.
+- [ ] Scroll to trigger more results (or apply a filter): new cards also get tags.
+- [ ] While on a listing page, the panel points to the price tag on a result card rather than "waiting for this page's price".
+- [ ] Open a product with an obvious cheaper duplicate in the catalogue: the panel shows a pulsing green light with the price/saving in its tooltip, the dashboard history lists the cheaper listing with its saving, and one notification fires at ≥3% and ≥GH₵ 1.
+- [ ] Open a product whose only alternatives are another brand's version of the same thing (for example the 4-slot USB chargers): the match is marked **similar**, the notification says *Cheaper similar item on Jumia* and adds *Similar product, different brand/model.*
+- [ ] Untick **💸 Cheaper** in the dashboard: no new `/catalog/?q=` requests appear in DevTools, the panel light disappears, and the `💸 -x%` row badges stop updating.
+- [ ] Re-tick the option: a search runs immediately, the row badge and panel light return.
+- [ ] Confirm an unrelated cheaper item (a case, a cable, a different capacity, an unrelated product) is **not** offered as an alternative.
 - [ ] Leave and revisit the same product within 12 hours: no second catalogue search is made.
+- [ ] Click **Update items**: outdated Jumia rows are re-read (40 max), their brand/image/fulfilment fills in, and the label reports remaining items; AliExpress rows are counted as visit-only.
 
 ### AliExpress
 - [ ] Load an item page: `AliExpress` badge, name, price, and GHS formatting.
@@ -300,7 +321,7 @@ The UI must remain readable.
 | Smart watch never checks | watch is off, budget exhausted, tab hidden, host backing off, or all products are AliExpress/at-target |
 | Smart watch checks too often | lower `maxChecksPerDay`, raise `minIntervalMs`, or set targets to retire aspirational products |
 | No cheaper alternative found | the title has too few distinctive tokens, the catalogue has no compatible listing, the feature is off, or the 12h throttle/1h failure backoff is active |
-| Wrong cheaper alternative shown | tighten `matchAltCandidate`/`variantsCompatible` and add the rejected pair as a test; do not simply widen the overlap threshold |
+| Wrong cheaper alternative shown | tighten `matchAltCandidate`/`matchSimilarCandidate`/`variantsCompatible` and add the rejected pair as a test; do not simply widen the overlap threshold |
 | Delivery badge says Marketplace for an imported item | Jumia did not expose an Express/abroad signal on that page; the badge never guesses |
 | Track button missing | `#wishlist` was not found (non-product page, login wall, or a layout change); check the console and `.jpt-add-col` |
 

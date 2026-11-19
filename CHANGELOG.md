@@ -2,6 +2,61 @@
 
 All notable changes to this project are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions use `MAJOR.MINOR.PATCH`.
 
+## [3.15.1] — 2026-11-19
+
+### Fixed
+- **Repeated glued words no longer hide similar listings.** Some Jumia titles contain a doubled token (`BatteriesBatteries Not Included`). The similar-item matcher now collapses an exact repeated half before comparing product-type words, so the Zarsyn 4-slot USB charger is found as an alternative to the Shebsheb charger instead of being silently dropped.
+- **Similar-item notifications are labelled honestly.** A match that is only the same *type* of product now adds `Similar product, different brand/model.` to the notification body, so it is never mistaken for an exact same-product match. Exact matches are unchanged.
+
+### Tests
+- The matching suite now asserts both cited 4-slot USB chargers (Generic `300625276` and Zarsyn `300590769`) appear as `similar: true`, the cheapest is `GH₵ 89.00`, and a charging cable or bare AA/AAA cells are still rejected. Total: **32 jsdom cases**.
+
+## [3.15.0] — 2026-11-19
+
+### Added
+- **Price-direction filter.** The dashboard toolbar gains **All / ↓ Price reduced / ↑ Price increased**. A direction choice is saved to `jumia_gh_dash_filter` and restored the next time the dashboard opens, alongside the remembered sort.
+- **Parse-once history cache.** `peekHistory()` keeps the parsed history object until the raw stored string changes, so rendering rows, badges, and buttons no longer re-parses the full JSON for every lookup. Read-only callers use `peekHistory()`; writers still use `loadHistory()`.
+
+### Changed
+- **Retention raised to 5,000 products** (from 200), newest final sample first. The per-product 120-sample cap is unchanged.
+- **Dashboard search is debounced** (120 ms), so typing does not rebuild the whole list on every keystroke.
+- **Result-card scanning is capped at five attempts per card**, preventing an unparseable card from being rescanned forever on a heavy listing page.
+- **Hidden-tab SPA guard.** AliExpress URL watching ignores navigation while the tab is hidden, so a background tab cannot record a half-rendered product.
+
+### Fixed
+- **Unreadable history is preserved.** If the stored JSON cannot be parsed, the raw value is copied to `jumia_gh_price_history_corrupt_backup` before the script continues with an empty view. A later save can no longer silently destroy the only copy.
+
+## [3.14.0] — 2026-11-17
+
+### Added
+- **Deal analysis.** Opening a product's history now judges the current price against its own recorded samples (needs at least three samples over two days): *At its lowest recorded price*, *Close to its lowest price*, *Below its average price*, *Above average — consider waiting*, *Price has been stable*, or *Typical price*. The box shows the average, low, high, and the percentage of recorded prices the current price beats.
+- **Deal flags and Best deals sort.** Rows gain `🔥 low`, `👍 good`, `⏳ wait`, and `🏷 inflated` flags. **Best deals** sorts by how far the current price sits below its own average.
+- **Inflated "was" price warning.** When a listing claims a large discount but its "was" price is far above anything ever recorded, the history view explains that the claimed saving is not supported by the price history.
+- **Set target to the low.** One click sets a product's target to its recorded low, after which the target button and smart-watch scheduling use it.
+- **Reference lines.** The history chart draws dashed **avg** and **🎯 target** lines and extends its Y range to include the target.
+- **Old prices from result cards.** Card tracking now stores the visible pre-discount price (`op`) when the card shows one, so deal analysis has the same data as a product-page visit.
+
+### Changed
+- **JSON-LD price extraction keeps the visible "was" price.** When JSON-LD and visible DOM agree on the current price, the DOM's pre-discount price is borrowed for the inflated-discount check.
+
+## [3.13.1] — 2026-11-16
+
+Consolidated release covering every change since 3.11.1.
+
+### Added
+- **Similar items across brands.** A second, looser matcher compares product-*type* words after removing brand, model numbers, capacities, colours, and marketing filler. It finds fair alternatives such as another 4-slot USB battery charger from a different brand, while still rejecting accessories and variant conflicts. Such matches are stored with `similar: true`.
+- **Two catalogue queries.** Each alternative check now searches a short core query (brand/model/type) and a wider type query, merging both result pages. This finds listings that omit the brand or reorder the title. Queries are spaced so the catalogue is not hammered.
+- **Cheaper-alternative details in the dashboard.** The history view lists every stored alternative with its price, saving, and a `similar` badge, instead of only the single best match.
+- **Green "cheaper listing" light.** The floating panel now shows a small pulsing green light when a cheaper exact or similar listing exists, with the price, saving, and a click target for the dashboard. The old always-visible alternatives block is gone.
+- **Icon-only price-tag track buttons.** The **Track price** control on product pages and result cards is now a price-tag SVG styled after the wishlist heart, with no visible text. It keeps an accessible label (`Track price` / `Tracked — open dashboard`), fills orange when tracked, and matches the heart's size on product pages.
+- **Update items pass.** A dashboard button re-reads up to 40 tracked Jumia pages per click, oldest/outdated first, filling in brand, image, Express/abroad fulfilment, and re-running alternative searches. Products carry `dv` (`DATA_VERSION = 3`) so older entries are prioritised; AliExpress items are reported as visit-only.
+- **Panel position stays grabbable.** Dragging the panel past a viewport edge keeps a 60 px strip on screen, so the header cannot be stranded off-screen.
+
+### Changed
+- Alternative notifications distinguish **Cheaper similar item on Jumia** from an exact **Cheaper alternative on Jumia**, and the dashboard badge links the matching listing.
+- The panel's current-price line includes the visible pre-discount price (`was …`) when the page exposes one.
+- Track buttons are keyed by the product in their own card and synchronised from storage after any record, delete, or background update.
+
 ## [3.11.1] — 2026-11-16
 
 ### Added

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jumia Ghana – Price Tracker + Coupons + Dashboard
 // @namespace    https://github.com/yourname/jumia-price-tracker
-// @version      3.11.1
+// @version      3.15.1
 // @description  Price tracker with product images, cheaper-alternative finder, Jumia Express/abroad badges, one-click tracking from result cards, coupons, and a tracking dashboard for jumia.com.gh and aliexpress.com (Ghana / GHS)
 // @author       Oxide5401
 // @homepageURL  https://github.com/Oxide5401/Jumia-and-AliExpress-Price-Tracker
@@ -87,12 +87,13 @@
         couponRetryKey: IS_ALI ? 'aliexpress_coupons_retry_after' : 'jumia_gh_coupons_retry_after',
         couponShowAllKey: IS_ALI ? 'aliexpress_coupons_show_all' : 'jumia_gh_coupons_show_all',
         maxSamplesPerProduct: 120,
-        maxProducts: 200,
+        maxProducts: 5000,
         dropThresholdPercent: 5,
         uiPanelId: 'price-tracker-panel',
         trackedModalId: 'price-tracker-modal',
         dashWindowKey: 'jumia_gh_dash_window',
         dashSortKey: 'jumia_gh_dash_sort',
+        dashFilterKey: 'jumia_gh_dash_filter',
         panelPosKey: 'jumia_gh_panel_pos',
         notificationTimeout: 10000,
         couponPageUrls: SITE.couponPageUrls,
@@ -137,8 +138,9 @@
             notifyCooldownMs: 24 * 60 * 60 * 1000,
             minSavingPercent: 3,
             minSavingAmount: 1,
-            maxItems: 6,
-            queryWords: 12,
+            maxItems: 8,
+            queryWords: 6,
+            coreWords: 3,
         },
     };
 
@@ -503,24 +505,94 @@
         return overlap + Math.min(0.2, modelish.length * 0.02);
     }
     function rankAltCandidates(current, items) {
-        const strict = [], loose = [];
+        const out = [];
         for (const c of items) {
             if (!(c.price > 0)) continue;
-            const s = matchAltCandidate(current, c);
-            if (s) strict.push({ ...c, score: s });
-            else {
-                const l = matchAltCandidate(current, c, { relaxed: true });
-                if (l) loose.push({ ...c, score: l });
-            }
+            let s = matchAltCandidate(current, c);
+            let similar = false;
+            if (!s) { s = matchAltCandidate(current, c, { relaxed: true }); similar = !!s; }
+            if (!s) { s = matchSimilarCandidate(current, c); similar = !!s; }
+            if (s) out.push({ ...c, score: s, similar });
         }
-        const ranked = (strict.length ? strict : loose)
-            .sort((x, y) => x.price - y.price || y.score - x.score);
-        return ranked;
+        return out.sort((x, y) => x.price - y.price || y.score - x.score);
     }
-    function altSearchQuery(name) {
-        const toks = String(name == null ? '' : name)
-            .replace(/[^\p{L}\p{N}]+/gu, ' ').trim().split(/\s+/).filter(Boolean);
-        return toks.slice(0, CONFIG.alts.queryWords).join(' ');
+    // ── "Similar item" matching ───────────────────────────────────
+    // Same product type from any brand: a 4-slot USB battery charger is a
+    // fair alternative to another 4-slot USB battery charger. Brand, model
+    // numbers, capacities and marketing adjectives are ignored; the product
+    // type words must overlap and accessory/variant conflicts still reject.
+    const TOKEN_SYNONYMS = {
+        batteries: 'battery', charging: 'charger', charge: 'charger', chargers: 'charger',
+        intelligent: 'smart', bay: 'slot', bays: 'slot', slots: 'slot',
+    };
+    const SIMILAR_NOISE = new Set([
+        'generic', 'other', 'universal', 'smart', 'fast', 'rechargeable', 'led', 'indicator',
+        'suitable', 'compatible', 'not', 'included', 'without', 'support', 'supports',
+        'quick', 'best', 'good', 'multi', 'multifunction', 'professional', 'home',
+        'office', 'outdoor', 'travel', 'usage', 'use', 'for', 'new', 'hot', 'sale',
+    ]);
+    // Extra words dropped only when building the short "core" search query.
+    const QUERY_NOISE = new Set(['slot', 'single', 'box', 'pack', 'dual', 'double', 'mini', 'big']);
+
+    function canonToken(t) {
+        if (TOKEN_SYNONYMS[t]) return TOKEN_SYNONYMS[t];
+        // Stores sometimes glue a repeated word together in titles
+        // ("BatteriesBatteries Not Included"). Collapse the exact repeat first.
+        if (t.length >= 6 && t.length % 2 === 0) {
+            const half = t.slice(0, t.length / 2);
+            if (half === t.slice(t.length / 2)) return canonToken(half);
+        }
+        if (t.length >= 5 && /s$/.test(t) && !/(?:ss|us|is)$/.test(t)) return t.slice(0, -1);
+        return t;
+    }
+    /**
+     * Product-type words of a title: no brand, no tokens containing digits
+     * (models, capacities), no repeated-letter cell sizes (AAAAA), no noise.
+     */
+    function typeTokens(name, brand, { raw = false, forQuery = false } = {}) {
+        const skip = new Set(altNameTokens(brand || '').map(canonToken));
+        const seen = new Set(), out = [];
+        for (const w of significantTokens(name)) {
+            const t = canonToken(w);
+            if (t.length < 3 || /\d/.test(t) || /^a{2,5}$/.test(t)) continue;
+            if (skip.has(t) || SIMILAR_NOISE.has(t) || (forQuery && QUERY_NOISE.has(t))) continue;
+            if (seen.has(t)) continue;
+            seen.add(t);
+            out.push(raw ? w : t);
+        }
+        return out;
+    }
+    function slotCount(name) {
+        const m = String(name == null ? '' : name).toLowerCase().match(/\b(\d{1,2})\s*[- ]?\s*(?:bays?|slots?)\b/);
+        return m ? +m[1] : null;
+    }
+    function matchSimilarCandidate(current, candidate) {
+        const aName = (current && current.name) || '';
+        const bName = (candidate && candidate.name) || '';
+        if (!aName || !bName) return 0;
+        if (accessoryConflict(aName, bName)) return 0;
+        const A = typeTokens(aName, current && current.brand);
+        const B = typeTokens(bName, candidate && candidate.brand);
+        const min = Math.min(A.length, B.length);
+        if (min < 2) return 0;
+        const bSet = new Set(B);
+        const shared = A.filter(t => bSet.has(t));
+        if (shared.length < (min >= 4 ? 3 : 2)) return 0;
+        const ratio = shared.length / min;
+        if (ratio < 0.5) return 0;
+        let score = ratio * 0.8 + Math.min(0.15, shared.length * 0.03);
+        const sa = slotCount(aName), sb = slotCount(bName);
+        if (sa != null && sb != null && sa === sb) score += 0.15;
+        return score;
+    }
+    /** A short core query plus a wider one, so one miss does not hide matches. */
+    function altSearchQueries(name, brand) {
+        const core = typeTokens(name, brand, { raw: true, forQuery: true }).slice(0, CONFIG.alts.coreWords);
+        const wide = typeTokens(name, brand, { raw: true }).slice(0, CONFIG.alts.queryWords);
+        const out = [];
+        for (const q of [core.join(' '), wide.join(' ')])
+            if (q && altNameTokens(q).length >= 2 && !out.includes(q)) out.push(q);
+        return out;
     }
     function altSearchUrl(query) {
         return 'https://www.jumia.com.gh/catalog/?q=' + encodeURIComponent(query);
@@ -912,7 +984,18 @@
             return null;
         }
         const j = extractFromJsonLd(doc, base);
-        if (j && j.price) return { ...j, source: 'json-ld' };
+        if (j && j.price) {
+            // JSON-LD carries no "was" price; borrow it from the visible markup
+            // when the two agree on the current price (feeds the inflated-discount check).
+            if (!j.oldPrice) {
+                try {
+                    const dd = extractFromDomJumia(doc);
+                    if (dd && dd.oldPrice && dd.oldPrice > j.price && dd.oldPrice <= j.price * 10 &&
+                        Math.abs(dd.price - j.price) / j.price < 0.02) j.oldPrice = dd.oldPrice;
+                } catch { /* optional */ }
+            }
+            return { ...j, source: 'json-ld' };
+        }
         const d = extractFromDomJumia(doc);
         if (d && d.price) return { ...d, currency: SITE.currency, source: 'dom' };
         const m = extractFromMeta(doc);
@@ -933,16 +1016,92 @@
     // ──────────────────────────────────────────────────────────────
     // 4. PRICE STORAGE
     // ──────────────────────────────────────────────────────────────
+    // Bump when stored product data gains new fields (fulfilment, brand, …).
+    // Products stamped with an older value are offered for the "Update items" pass.
+    const DATA_VERSION = 3;
+    /**
+     * Judges the current price against the product's own history. Needs a few
+     * samples over a couple of days; returns null until then. Also flags a
+     * "was" price that has never been matched by any recorded price.
+     */
+    function analyzeDeal(p) {
+        const all = (p && Array.isArray(p.samples) ? p.samples : []).filter(s => s && typeof s.p === 'number');
+        const base = priceBaseline(p);
+        const view = all.slice(base ? Math.max(0, all.indexOf(base)) : 0);
+        if (view.length < 3) return null;
+        const span = (view.at(-1).t || 0) - (view[0].t || 0);
+        if (span < 2 * DAY_MS) return null;
+        const prices = view.map(s => s.p);
+        const cur = prices.at(-1);
+        const low = Math.min(...prices), high = Math.max(...prices);
+        const avg = prices.reduce((a, b) => a + b, 0) / prices.length;
+        const cheaperThan = Math.round((prices.filter(x => x > cur).length / prices.length) * 100);
+        let kind = 'ok', text = 'Typical price';
+        if (high <= low * 1.02) { kind = 'flat'; text = 'Price has been stable'; }
+        else if (cur <= low * 1.005) { kind = 'low'; text = 'At its lowest recorded price'; }
+        else if (cur <= low * 1.05) { kind = 'good'; text = 'Close to its lowest price'; }
+        else if (cur <= avg * 0.95) { kind = 'good'; text = 'Below its average price'; }
+        else if (cur >= avg * 1.05 && cur >= low * 1.15) { kind = 'wait'; text = 'Above average — consider waiting'; }
+
+        let inflated = null;
+        const op = view.at(-1).op;
+        if (op && op > cur && view.length >= 4 && span >= 7 * DAY_MS && op >= high * 1.25) {
+            const claimed = ((op - cur) / op) * 100;
+            if (claimed >= 15) inflated = { op, high, claimed, real: avg > 0 ? ((avg - cur) / avg) * 100 : 0 };
+        }
+        return { kind, text, cur, low, high, avg, cheaperThan, inflated };
+    }
+
+    function needsUpdate(key, p) {
+        return !!p && !isAliProduct(key, p) && /^https?:/i.test(p.url || '') && p.dv !== DATA_VERSION;
+    }
+
+    // Parse-once cache keyed on the raw stored string. peekHistory() returns a
+    // SHARED object and must be treated as read-only; use loadHistory() (a fresh
+    // copy) whenever you intend to change something and saveHistory() it.
+    let histRaw = null, histObj = null;
+    function parseHistory(raw) {
+        let h;
+        try { h = JSON.parse(raw); }
+        catch (e) {
+            // Never let an unreadable value be silently overwritten by the next
+            // save: keep a copy under a backup key so it can be recovered.
+            try {
+                if (raw && raw !== '{}') {
+                    GM_setValue(CONFIG.storageKey + '_corrupt_backup', String(raw));
+                    warn('History was unreadable; raw copy kept under "' + CONFIG.storageKey + '_corrupt_backup".', e);
+                }
+            } catch { /* best effort */ }
+            return {};
+        }
+        if (!h || typeof h !== 'object' || Array.isArray(h)) return {};
+        for (const k of Object.keys(h)) {
+            const p = h[k];
+            if (!p || typeof p !== 'object') { delete h[k]; continue; }
+            if (!Array.isArray(p.samples)) p.samples = [];
+        }
+        return h;
+    }
+    function peekHistory() {
+        let raw;
+        try { raw = GM_getValue(CONFIG.storageKey, '{}'); } catch { return {}; }
+        if (histObj === null || raw !== histRaw) {
+            histObj = parseHistory(raw);
+            histRaw = raw;
+        }
+        return histObj;
+    }
     function loadHistory() {
-        try { return JSON.parse(GM_getValue(CONFIG.storageKey, '{}')); }
-        catch { return {}; }
+        let raw;
+        try { raw = GM_getValue(CONFIG.storageKey, '{}'); } catch { return {}; }
+        return parseHistory(raw);
     }
     function saveHistory(h) {
         try {
             const keys = Object.keys(h);
             if (keys.length > CONFIG.maxProducts) {
                 const sorted = keys.sort((a, b) =>
-                    (h[b].samples.at(-1)?.t || 0) - (h[a].samples.at(-1)?.t || 0));
+                    (h[b].samples?.at(-1)?.t || 0) - (h[a].samples?.at(-1)?.t || 0));
                 const kept = {};
                 sorted.slice(0, CONFIG.maxProducts).forEach(k => kept[k] = h[k]);
                 h = kept;
@@ -1036,6 +1195,7 @@
                 if (brand) product.brand = brand;
                 const fulfilment = detectFulfilment();
                 if (fulfilment) product.fulfilment = { ...fulfilment, checkedAt: now };
+                product.dv = DATA_VERSION;
             } catch (e) { warn('fulfilment/brand detection failed', e); }
         }
 
@@ -1066,6 +1226,7 @@
             url: c.url, name: c.name, price: c.price,
             brand: c.brand || '', image: c.image || '',
             express: !!c.express, abroad: !!c.abroad,
+            similar: !!c.similar,
         };
     }
     function saveAltState(key, patch) {
@@ -1078,26 +1239,29 @@
         const a = (product && product.alts) || {};
         const now = Date.now();
         if (a.failedAt && now - a.failedAt < CONFIG.alts.failBackoffMs) return false;
+        if (a.checkedAt && a.v !== 2) return true;   // re-run with the broader matcher
         return now - (a.checkedAt || 0) >= CONFIG.alts.checkIntervalMs;
     }
 
     async function checkCheaperAlts(key, { force = false } = {}) {
         if (SITE.id !== 'jumia' || !cheaperAltsEnabled()) return null;
-        const product = loadHistory()[key];
+        const product = peekHistory()[key];
         if (!product || product.site === 'aliexpress') return null;
         if (!force && !altCheckDue(product)) return null;
         if (altInFlight.has(key)) return null;
         const currentPrice = priceOf(product);
         const name = displayName(key, product);
-        const query = altSearchQuery(name);
-        if (currentPrice == null || altNameTokens(query).length < 2) return null;
+        const queries = altSearchQueries(name, product.brand || '');
+        if (currentPrice == null || !queries.length) return null;
 
         altInFlight.add(key);
-        let html;
-        try {
-            html = await fetchHtml(altSearchUrl(query));
-        } catch (e) {
-            warn('cheaper-alternative search failed', e);
+        const pages = [];
+        for (let i = 0; i < queries.length; i++) {
+            try { pages.push(await fetchHtml(altSearchUrl(queries[i]))); }
+            catch (e) { warn('cheaper-alternative search failed', queries[i], e); }
+            if (i < queries.length - 1) await new Promise(r => setTimeout(r, 400));
+        }
+        if (!pages.length) {
             saveAltState(key, { failedAt: Date.now() });
             altInFlight.delete(key);
             renderAltPanel();
@@ -1105,17 +1269,22 @@
         }
 
         try {
-            const items = parseJumiaSearchResults(html, product.url, key);
+            const items = [];
+            const seenUrls = new Set();
+            for (const html of pages)
+                for (const it of parseJumiaSearchResults(html, product.url, key))
+                    if (!seenUrls.has(it.url)) { seenUrls.add(it.url); items.push(it); }
             const ranked = rankAltCandidates({ name, brand: product.brand || '' }, items);
             const best = ranked[0] || null;
             saveAltState(key, {
                 checkedAt: Date.now(),
                 failedAt: 0,
-                query,
+                v: 2,
+                query: queries.join(' | '),
                 items: ranked.slice(0, CONFIG.alts.maxItems).map(altFields),
                 best: best ? altFields(best) : null,
             });
-            const fresh = loadHistory()[key];
+            const fresh = peekHistory()[key];
             if (best && fresh) maybeNotifyCheaper(key, fresh, best);
             renderAltPanel();
             refreshDashboardIfOpen();
@@ -1140,72 +1309,45 @@
 
         const code = product.currency || 'GHS';
         notify(
-            'Cheaper alternative on Jumia',
+            best.similar ? 'Cheaper similar item on Jumia' : 'Cheaper alternative on Jumia',
             `${displayName(key, product)}\nCurrent: ${formatMoney(current, code)}\n` +
             `${truncate(best.name, 90)} — ${formatMoney(best.price, code)}` +
             (best.express ? ' · ⚡ Express' : '') + `\n` +
-            `Save ${formatMoney(saving, code)} (${pct.toFixed(0)}%)`
+            `Save ${formatMoney(saving, code)} (${pct.toFixed(0)}%)` +
+            (best.similar ? '\nSimilar product, different brand/model.' : '')
         );
         saveAltState(key, { notifiedAt: Date.now(), notifiedUrl: best.url });
     }
 
-    function altPanelText(product) {
-        const code = (product && product.currency) || 'GHS';
-        const alts = (product && product.alts) || null;
-        if (!product) return { html: 'Waiting for this page\u2019s price…' };
-        if (!alts || (!alts.checkedAt && !alts.failedAt))
-            return { html: 'Checking Jumia for a cheaper match…' };
-        const best = alts.best;
-        if (!best) {
-            return {
-                html: alts.checkedAt
-                    ? `No similar listing found. Checked ${timeAgo(alts.checkedAt)}.`
-                    : 'Search unavailable — will retry later.',
-            };
-        }
-        const current = priceOf(product);
-        const saving = current != null ? current - best.price : null;
-        const pct = current > 0 ? (saving / current) * 100 : 0;
-        const cheaper = saving != null &&
-            saving >= CONFIG.alts.minSavingAmount && pct >= CONFIG.alts.minSavingPercent;
-        const meta = `${formatMoney(best.price, code)}` +
-            (cheaper
-                ? ` <b class="jpt-alt-save">−${pct.toFixed(0)}%</b> (save ${formatMoney(saving, code)})`
-                : ' <span class="jpt-alt-same">not cheaper</span>') +
-            (best.express ? ' · <span class="jpt-alt-xprs">⚡ Express</span>' : '') +
-            (best.abroad ? ' · <span class="jpt-alt-abroad">✈ Abroad</span>' : '');
-        return {
-            html: `<a class="jpt-alt-link" href="${escapeHtml(best.url)}" target="_blank" rel="noopener"` +
-                ` title="${escapeHtml(best.name)}">${escapeHtml(truncate(best.name, 62))}</a>` +
-                `<div class="jpt-alt-meta">${meta}</div>` +
-                `<div class="jpt-alt-when">Checked ${timeAgo(alts.checkedAt)}</div>`,
-        };
-    }
-
+    /**
+     * Mini window shows only a small green light when a cheaper listing is
+     * known for the product on this page. Details live in the dashboard.
+     */
     function renderAltPanel() {
         const panel = document.getElementById(CONFIG.uiPanelId);
         if (!panel) return;
-        const block = panel.querySelector('.jpt-alts');
-        if (!block) return;
-        if (SITE.id !== 'jumia') { block.hidden = true; return; }
-        block.hidden = false;
-        const enabled = cheaperAltsEnabled();
-        const cb = block.querySelector('.jpt-alts-cb');
-        if (cb) cb.checked = enabled;
-        block.classList.toggle('off', !enabled);
-        const body = block.querySelector('.jpt-alts-body');
-        if (!body) return;
-        if (!enabled) {
-            body.innerHTML = '<span class="jpt-alts-off">Off — turn on to look for cheaper Jumia listings.</span>';
-            return;
+        const light = panel.querySelector('.jpt-light');
+        if (!light) return;
+        let show = false, title = '';
+        if (SITE.id === 'jumia' && cheaperAltsEnabled() && isProductPage()) {
+            const product = peekHistory()[getProductKey()];
+            const best = product && product.alts && product.alts.best;
+            const current = priceOf(product);
+            if (best && current != null) {
+                const saving = current - best.price;
+                const pct = current > 0 ? (saving / current) * 100 : 0;
+                if (saving >= CONFIG.alts.minSavingAmount && pct >= CONFIG.alts.minSavingPercent) {
+                    const code = product.currency || 'GHS';
+                    show = true;
+                    title = `${best.similar ? 'Cheaper similar item' : 'Cheaper listing'} available: ` +
+                        `${formatMoney(best.price, code)} (save ${formatMoney(saving, code)}, −${pct.toFixed(0)}%). ` +
+                        'Click to see it.';
+                }
+            }
         }
-        if (!isProductPage()) {
-            body.innerHTML = '<span class="jpt-alts-off">Open a product, or use 💰 Track on a result card.</span>';
-            return;
-        }
-        const key = getProductKey();
-        const product = loadHistory()[key];
-        body.innerHTML = altPanelText(product).html;
+        light.hidden = !show;
+        light.title = title;
+        light.setAttribute('aria-label', title || 'Cheaper listing available');
     }
 
     function syncAltsToggles() {
@@ -1831,6 +1973,11 @@
         if (status) status.textContent = watchStatusText();
         const checkNow = modal.querySelector('.jtm-watch-now');
         if (checkNow) checkNow.disabled = !swEnabled();
+        const upd = modal.querySelector('.jtm-update');
+        if (upd && !upd.disabled) {
+            const n = Object.entries(peekHistory()).filter(([k, p]) => needsUpdate(k, p)).length;
+            upd.textContent = n ? `Update items (${n})` : 'Update items';
+        }
     }
 
     // ──────────────────────────────────────────────────────────────
@@ -2639,27 +2786,14 @@
             <div class="jpt-header" title="Drag to move · double-click to reset position">
                 <span class="jpt-title">💰 Price Tracker</span>
                 <span class="jpt-site">${escapeHtml(SITE.shortLabel)}</span>
+                <button class="jpt-light" type="button" hidden title="Cheaper listing available" aria-label="Cheaper listing available"></button>
                 <button class="jpt-tracked-btn" title="View all tracked products">📊 <span class="jpt-tracked-count">0</span></button>
                 <button class="jpt-close" title="Close">×</button>
             </div>
             <div class="jpt-body">
-                <div class="jpt-product">
-                    <span class="jpt-thumb jpt-thumb-empty">🛍</span>
-                    <span class="jpt-product-name"></span>
-                </div>
-                <div class="jpt-current">Detecting…</div>
                 <div class="jpt-fulfilment" hidden></div>
                 <div class="jpt-stats"></div>
                 <div class="jpt-listing" hidden></div>
-                <div class="jpt-alts" hidden>
-                    <div class="jpt-alts-head">
-                        <span class="jpt-alts-title">💸 Cheaper alternatives</span>
-                        <label class="jpt-alts-toggle" title="Look for the same product listed cheaper by another Jumia seller.">
-                            <input type="checkbox" class="jpt-alts-cb" /> on
-                        </label>
-                    </div>
-                    <div class="jpt-alts-body"></div>
-                </div>
                 <div class="jpt-actions">
                     <button class="jpt-btn jpt-refresh">Refresh</button>
                     <button class="jpt-btn jpt-find-coupons">Find Coupons</button>
@@ -2703,6 +2837,18 @@
                 font-size: 10px; font-weight: 700; letter-spacing: .3px;
                 background: #eaf1ff; color: #2456a6; border: 1px solid #cfdcff;
                 padding: 1px 5px; border-radius: 3px; white-space: nowrap;
+            }
+            #${CONFIG.uiPanelId} .jpt-light {
+                flex: 0 0 auto; width: 12px; height: 12px; padding: 0; margin: 0 2px;
+                border: 1px solid #14a34a; border-radius: 50%; cursor: pointer;
+                background: radial-gradient(circle at 35% 35%, #86efac, #22c55e 60%, #16a34a);
+                box-shadow: 0 0 6px 2px rgba(34,197,94,.6);
+                animation: jpt-light-pulse 1.8s ease-in-out infinite;
+            }
+            #${CONFIG.uiPanelId} .jpt-light[hidden] { display: none; }
+            @keyframes jpt-light-pulse {
+                0%, 100% { box-shadow: 0 0 4px 1px rgba(34,197,94,.45); }
+                50% { box-shadow: 0 0 9px 3px rgba(34,197,94,.85); }
             }
             #${CONFIG.uiPanelId} .jpt-tracked-btn {
                 background: #fff; border: 1px solid #ccc; border-radius: 4px;
@@ -2845,17 +2991,21 @@
                 gap: 6px; flex: 0 0 auto;
             }
             .jpt-add-col #wishlist { margin: 0; }
+            /* Styled after Jumia's native wishlist heart: round, white, soft shadow. */
             .jpt-add-track {
-                display: inline-flex; align-items: center; justify-content: center; gap: 4px;
-                padding: 5px 9px; border: 1px solid #e0a300; border-radius: 6px;
-                background: #fff6df; color: #7a4a00; cursor: pointer;
-                font: 700 11px/1.2 system-ui, -apple-system, sans-serif;
-                white-space: nowrap; box-shadow: 0 1px 2px rgba(0,0,0,.06);
+                display: inline-flex; align-items: center; justify-content: center;
+                width: 40px; height: 40px; padding: 0; margin: 0;
+                border: 1px solid #e4e4e4; border-radius: 50%;
+                background: #fff; color: #8a8a8a; cursor: pointer;
+                box-shadow: 0 1px 3px rgba(0,0,0,.12);
+                transition: color .15s, border-color .15s, box-shadow .15s, transform .1s;
             }
-            .jpt-add-track:hover { background: #ffefc4; border-color: #c98f00; }
-            .jpt-add-track:active { transform: translateY(1px); }
-            .jpt-add-track.tracked { background: #e7f6ec; border-color: #bfe6cb; color: #0f7434; }
-            .jpt-add-track .jpt-add-ico { font-size: 12px; line-height: 1; }
+            .jpt-add-track:hover { color: #f68b1e; border-color: #f68b1e; box-shadow: 0 2px 6px rgba(246,139,30,.3); }
+            .jpt-add-track:active { transform: scale(.94); }
+            .jpt-add-track.tracked { color: #f68b1e; border-color: #f68b1e; }
+            .jpt-add-track.tracked svg { fill: currentColor; }
+            .jpt-add-track .jpt-add-ico { display: flex; align-items: center; justify-content: center; line-height: 0; }
+            .jpt-add-track svg { width: 20px; height: 20px; display: block; }
             /* Listing/search cards: keep the heart top-right and add a compact
                button directly below it, without disturbing the card layout. */
             article.prd .jpt-card-col {
@@ -2867,11 +3017,10 @@
                 position: static; top: auto; right: auto; margin: 0;
             }
             article.prd .jpt-add-track.jpt-card-track {
-                padding: 2px 6px; border-radius: 4px;
-                font-size: 9px; line-height: 1.35;
-                box-shadow: 0 1px 3px rgba(0,0,0,.28);
+                width: 38px; height: 38px;
+                box-shadow: 0 1px 4px rgba(0,0,0,.22);
             }
-            article.prd .jpt-add-track.jpt-card-track .jpt-add-ico { font-size: 9px; }
+            article.prd .jpt-add-track.jpt-card-track svg { width: 19px; height: 19px; }
         `);
 
         // ── Movable panel: drag the header, remember the position ──
@@ -2893,9 +3042,12 @@
             const vp = viewport();
             const w = panel.offsetWidth || 330;
             const h = panel.offsetHeight || 300;
+            // Allow the panel to slide partly off-screen on any side; keep a
+            // grabbable strip visible (header stays reachable at the top).
+            const KEEP = 60;
             return {
-                x: Math.max(0, Math.min(p.x, Math.max(0, vp.w - w))),
-                y: Math.max(0, Math.min(p.y, Math.max(0, vp.h - h))),
+                x: Math.max(KEEP - w, Math.min(p.x, vp.w - KEEP)),
+                y: Math.max(0, Math.min(p.y, vp.h - KEEP)),
             };
         };
         const applyPos = () => {
@@ -3029,6 +3181,10 @@
             updatePanel(null); updateTrackedBadge(); renderCoupons();
         });
         panel.querySelector('.jpt-tracked-btn').addEventListener('click', openTrackedModal);
+        panel.querySelector('.jpt-light').addEventListener('click', () => {
+            if (isProductPage()) detailKey = getProductKey();
+            openTrackedModal();
+        });
 
         const showAllCb = panel.querySelector('.jpt-showall-cb');
         showAllCb.checked = isShowAll();
@@ -3046,19 +3202,23 @@
     }
 
     // ── "Track price" buttons: product page + listing cards ──────
+    // Price-tag outline; filled orange once the product is tracked.
+    const TRACK_ICON_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" ' +
+        'stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+        '<path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"/>' +
+        '<circle cx="7" cy="7" r="1.2" fill="#fff" stroke="none"/></svg>';
     function setTrackBtnState(btn, tracked) {
         if (!btn) return;
         btn.classList.toggle('tracked', tracked);
-        const txt = btn.querySelector('.jpt-add-txt');
-        if (txt) txt.textContent = tracked ? 'Tracked — open' : 'Track price';
         btn.title = tracked
             ? 'Already in your price tracker — click to open the dashboard'
             : 'Add this product to your price tracker';
+        btn.setAttribute('aria-label', tracked ? 'Tracked — open dashboard' : 'Track price');
     }
 
     /** Re-reads storage so every injected button shows the right state. */
     function syncTrackButtons() {
-        const h = loadHistory();
+        const h = peekHistory();
         document.querySelectorAll('.jpt-add-track[data-key]').forEach(btn => {
             setTrackBtnState(btn, !!h[btn.dataset.key]);
         });
@@ -3067,7 +3227,7 @@
     function onAddTrackClick() {
         const key = getProductKey();
         let panelResult = null;
-        if (!loadHistory()[key]) {
+        if (!peekHistory()[key]) {
             panelResult = recordPrice();
             if (panelResult) {
                 updatePanel(panelResult);
@@ -3082,6 +3242,27 @@
         }
         syncTrackButtons();
         openTrackedModal();
+    }
+
+    /** Copies the native wishlist button's size and surface so the two look like a pair. */
+    function matchWishlistLook(btn, heart) {
+        try {
+            const r = heart.getBoundingClientRect();
+            const cs = getComputedStyle(heart);
+            if (r.width >= 20 && r.height >= 20) {
+                const d = Math.round(Math.min(r.width, r.height));
+                btn.style.width = btn.style.height = d + 'px';
+                const svg = btn.querySelector('svg');
+                if (svg) svg.style.width = svg.style.height = Math.round(d * 0.5) + 'px';
+            }
+            if (cs.borderRadius && cs.borderRadius !== '0px') btn.style.borderRadius = cs.borderRadius;
+            if (cs.backgroundColor && cs.backgroundColor !== 'rgba(0, 0, 0, 0)')
+                btn.style.backgroundColor = cs.backgroundColor;
+            if (cs.boxShadow && cs.boxShadow !== 'none') btn.style.boxShadow = cs.boxShadow;
+            if (cs.borderTopWidth && cs.borderTopWidth !== '0px') {
+                btn.style.borderColor = cs.borderTopColor;
+            } else btn.style.borderColor = 'transparent';
+        } catch { /* cosmetic only */ }
     }
 
     function initTrackButton() {
@@ -3105,9 +3286,10 @@
         btn.type = 'button';
         btn.className = 'jpt-add-track';
         btn.dataset.key = getProductKey();
-        btn.innerHTML = '<span class="jpt-add-ico">💰</span><span class="jpt-add-txt">Track price</span>';
+        btn.innerHTML = '<span class="jpt-add-ico">' + TRACK_ICON_SVG + '</span>';
         btn.addEventListener('click', onAddTrackClick);
         col.appendChild(btn);
+        matchWishlistLook(btn, wish);
         syncTrackButtons();
     }
 
@@ -3129,6 +3311,8 @@
             : (link.getAttribute('data-gtm-name') || ''));
         const priceEl = info.querySelector('.prc') || card.querySelector('.prc');
         const price = parsePrice(priceEl ? priceEl.textContent : '');
+        const oldEl = info.querySelector('.old') || card.querySelector('.old');
+        const oldPrice = oldEl ? parsePrice(oldEl.textContent) : null;
         const img = card.querySelector('img.img');
         const image = absoluteImage(
             img && (img.getAttribute('data-src') || img.getAttribute('src')),
@@ -3142,7 +3326,7 @@
         const abroad = /(?:ships?|shipped|shipping)\s+from\s+abroad/i.test(cardText) ||
             !!card.querySelector('.bdg._glb, .bdg._gbl');
         return {
-            key, url, name, price, image, brand, express, abroad,
+            key, url, name, price, oldPrice, image, brand, express, abroad,
             fulfilment: {
                 kind: express ? 'express' : abroad ? 'abroad' : 'local',
                 express, abroad,
@@ -3164,7 +3348,11 @@
         if (info.image) product.image = info.image;
         if (info.brand) product.brand = info.brand;
         product.fulfilment = { ...info.fulfilment, checkedAt: now };
-        product.samples.push({ p: info.price, t: now, src: 'card' });
+        product.dv = DATA_VERSION;
+        product.samples.push({
+            p: info.price, t: now, src: 'card',
+            op: info.oldPrice && info.oldPrice > info.price && info.oldPrice <= info.price * 10 ? info.oldPrice : null,
+        });
         if (product.samples.length > CONFIG.maxSamplesPerProduct)
             product.samples = product.samples.slice(-CONFIG.maxSamplesPerProduct);
         saveHistory(h);
@@ -3174,7 +3362,7 @@
     function onCardTrackClick(card) {
         const info = cardProductInfo(card);
         if (!info) return;
-        if (!loadHistory()[info.key]) {
+        if (!peekHistory()[info.key]) {
             const result = recordCardProduct(card);
             if (!result) {
                 const panel = document.getElementById(CONFIG.uiPanelId);
@@ -3189,11 +3377,15 @@
     }
 
     /** Wraps each card heart and puts a compact track button below it. */
+    const cardScanTries = new WeakMap();
     function initCardTrackButtons() {
         if (SITE.id !== 'jumia' || isProductPage()) return;
         let added = 0;
         document.querySelectorAll('article.prd').forEach(card => {
             if (card.querySelector('.jpt-add-track')) return;
+            const tries = cardScanTries.get(card) || 0;
+            if (tries >= 5) return;
+            cardScanTries.set(card, tries + 1);
             const heart = card.querySelector('.btn._wslt, a[data-track-onclick="wishlist"]');
             if (!heart || !heart.parentElement) return;
             if (heart.closest('.jpt-card-col')) return;
@@ -3201,7 +3393,7 @@
             if (!info) return;
             // Show the tracked state even without a price, but don't add a
             // dead button to an out-of-stock card.
-            if (!(info.price > 0) && !loadHistory()[info.key]) return;
+            if (!(info.price > 0) && !peekHistory()[info.key]) return;
 
             const col = document.createElement('div');
             col.className = 'jpt-card-col';
@@ -3212,13 +3404,14 @@
             btn.type = 'button';
             btn.className = 'jpt-add-track jpt-card-track';
             btn.dataset.key = info.key;
-            btn.innerHTML = '<span class="jpt-add-ico">💰</span><span class="jpt-add-txt">Track price</span>';
+            btn.innerHTML = '<span class="jpt-add-ico">' + TRACK_ICON_SVG + '</span>';
             btn.addEventListener('click', e => {
                 e.preventDefault();
                 e.stopPropagation();
                 onCardTrackClick(card);
             });
             col.appendChild(btn);
+            matchWishlistLook(btn, heart);
             added++;
         });
         if (added) syncTrackButtons();
@@ -3237,20 +3430,30 @@
         if (!document.querySelector('article.prd')) return;
         initCardTrackButtons();
         if (cardObserver || typeof MutationObserver !== 'function') return;
-        cardObserver = new MutationObserver(scheduleCardScan);
+        cardObserver = new MutationObserver(muts => {
+            for (const m of muts) {
+                for (const n of m.addedNodes) {
+                    if (n.nodeType !== 1 || (n.classList && n.classList.contains('jpt-card-col'))) continue;
+                    if (n.matches?.('article.prd') || n.querySelector?.('article.prd')) {
+                        scheduleCardScan();
+                        return;
+                    }
+                }
+            }
+        });
         cardObserver.observe(document.body, { childList: true, subtree: true });
     }
 
     function updateTrackedBadge() {
         const el = document.querySelector(`#${CONFIG.uiPanelId} .jpt-tracked-count`);
-        if (el) el.textContent = Object.keys(loadHistory()).length;
+        if (el) el.textContent = Object.keys(peekHistory()).length;
         syncTrackButtons();
     }
     function updatePanel(result) {
         const panel = document.getElementById(CONFIG.uiPanelId);
         if (!panel) return;
-        const cur = panel.querySelector('.jpt-current');
-        const st = panel.querySelector('.jpt-stats');
+        const cur = panel.querySelector('.jpt-current') || {};
+        const st = panel.querySelector('.jpt-stats') || {};
         const fulfilmentEl = panel.querySelector('.jpt-fulfilment');
         const listingEl = panel.querySelector('.jpt-listing');
         const nameEl = panel.querySelector('.jpt-product-name');
@@ -3422,8 +3625,86 @@
             Array.from({ length: Math.min(2, total) }, worker)
         );
 
-        const remaining = Object.values(loadHistory()).filter(p => !p || !p.image).length;
+        const remaining = Object.values(peekHistory()).filter(p => !p || !p.image).length;
         return { ok, failed, remaining, total };
+    }
+
+    /**
+     * Re-reads tracked Jumia product pages and fills in data added by newer
+     * versions of the script (fulfilment badge, brand, image), then re-runs
+     * the cheaper-alternative search. Works through up to `limit` products per
+     * click, outdated ones first. AliExpress pages block scripted fetches, so
+     * those items update when you visit them.
+     */
+    async function refreshProducts(limit = 40, onProgress) {
+        const queue = Object.entries(loadHistory())
+            .filter(([k, p]) => p && !isAliProduct(k, p) && /^https?:/i.test(p.url || ''))
+            .sort((a, b) =>
+                (a[1].dv === DATA_VERSION) - (b[1].dv === DATA_VERSION) ||
+                (a[1].refreshedAt || 0) - (b[1].refreshedAt || 0))
+            .slice(0, limit);
+        const total = queue.length;
+        const refreshed = [];
+        let ok = 0, failed = 0, done = 0;
+
+        const worker = async () => {
+            for (;;) {
+                const item = queue.shift();
+                if (!item) return;
+                const [key, p] = item;
+                try {
+                    const html = await fetchHtml(p.url);
+                    const doc = new DOMParser().parseFromString(html, 'text/html');
+                    const info = extractFromJsonLd(doc, p.url) || extractFromDomJumia(doc) || extractFromMeta(doc);
+                    if (!info || !(info.price > 0)) throw new Error('no price found (blocked or removed page)');
+                    applyWatchedPrice(key,
+                        { ...info, currency: info.currency || p.currency || 'GHS', source: 'watch' },
+                        doc, p.url, '');
+                    const h = loadHistory();
+                    const cur = h[key];
+                    if (cur) {
+                        const brand = extractBrand(doc);
+                        if (brand) cur.brand = brand;
+                        cur.fulfilment = { ...detectFulfilment(doc), checkedAt: Date.now() };
+                        if (!cur.image) {
+                            const img = imageFromDoc(doc, p.url, false);
+                            if (img) cur.image = img;
+                        }
+                        cur.dv = DATA_VERSION;
+                        cur.refreshedAt = Date.now();
+                        saveHistory(h);
+                        refreshed.push(key);
+                    }
+                    ok++;
+                } catch (e) {
+                    failed++;
+                    warn('Update failed:', p.url, e.message);
+                }
+                done++;
+                if (onProgress) onProgress(done, total);
+                await new Promise(r => setTimeout(r, 300));
+            }
+        };
+        await Promise.all(Array.from({ length: Math.min(2, total) }, worker));
+
+        // Re-run the cheaper-alternative search for anything not yet checked
+        // with the current matcher (capped to stay polite to the store).
+        let alts = 0;
+        if (SITE.id === 'jumia' && cheaperAltsEnabled()) {
+            for (const key of refreshed) {
+                if (alts >= 20) break;
+                const prod = peekHistory()[key];
+                if (!prod || !altCheckDue(prod)) continue;
+                alts++;
+                if (onProgress) onProgress(done, total, `alternatives ${alts}`);
+                try { await checkCheaperAlts(key); } catch (e) { warn('alt check failed', e); }
+                await new Promise(r => setTimeout(r, 300));
+            }
+        }
+
+        const remaining = Object.entries(peekHistory()).filter(([k, p]) => needsUpdate(k, p)).length;
+        const aliSkipped = Object.entries(peekHistory()).filter(([k, p]) => isAliProduct(k, p)).length;
+        return { ok, failed, total, remaining, alts, aliSkipped };
     }
 
     /**
@@ -3495,6 +3776,7 @@
                     <button class="jtm-export">Export JSON</button>
                     <button class="jtm-import">Import JSON</button>
                     <button class="jtm-backfill">Fetch images</button>
+                    <button class="jtm-update" title="Re-read every tracked Jumia product page and fill in newer details (Express/abroad badge, brand, image, cheaper alternatives)">Update items</button>
                     <button class="jtm-clear-all">Clear All</button>
                 </div>
                 <div class="jtm-import-wrap">
@@ -3805,6 +4087,39 @@
             #${CONFIG.trackedModalId} .jtm-chg-pct.down { color: #128a3e; }
             #${CONFIG.trackedModalId} .jtm-chg-pct.up { color: #b00; }
             #${CONFIG.trackedModalId} .jtm-chg-src { flex: 0 0 42px; text-align: right; color: #aaa; }
+            #${CONFIG.trackedModalId} .jtm-deal {
+                display: flex; flex-direction: column; gap: 4px; align-items: flex-start;
+                padding: 8px 10px; margin-bottom: 12px; border-radius: 6px;
+                background: #f6f6f6; border: 1px solid #e6e6e6; font-size: 11px; color: #666;
+            }
+            #${CONFIG.trackedModalId} .jtm-deal b { font-size: 12px; color: #333; }
+            #${CONFIG.trackedModalId} .jtm-deal.low, #${CONFIG.trackedModalId} .jtm-deal.good { background: #eef9f1; border-color: #bfe6cb; }
+            #${CONFIG.trackedModalId} .jtm-deal.low b, #${CONFIG.trackedModalId} .jtm-deal.good b { color: #0f7434; }
+            #${CONFIG.trackedModalId} .jtm-deal.wait { background: #fff7e6; border-color: #f0c987; }
+            #${CONFIG.trackedModalId} .jtm-deal.wait b { color: #8a5a00; }
+            #${CONFIG.trackedModalId} .jtm-deal-warn {
+                color: #b00; background: #fdecec; border: 1px solid #efc4c4;
+                border-radius: 4px; padding: 5px 8px; line-height: 1.4;
+            }
+            #${CONFIG.trackedModalId} .jtm-lowtarget {
+                padding: 4px 9px; border: 1px solid #ccc; background: #fff; border-radius: 4px;
+                cursor: pointer; font-size: 11px; color: #333;
+            }
+            #${CONFIG.trackedModalId} .jtm-lowtarget:hover { background: #f0f0f0; }
+            #${CONFIG.trackedModalId} .jtm-altlist { margin-bottom: 4px; }
+            #${CONFIG.trackedModalId} .jtm-alt {
+                display: flex; align-items: center; flex-wrap: wrap; gap: 6px;
+                padding: 5px 4px; border-bottom: 1px solid #f4f4f4; font-size: 11px;
+            }
+            #${CONFIG.trackedModalId} .jtm-alt:last-child { border-bottom: none; }
+            #${CONFIG.trackedModalId} .jtm-alt-name {
+                flex: 1; min-width: 160px; color: #0b62c4; text-decoration: none; font-weight: 600;
+                overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+            }
+            #${CONFIG.trackedModalId} .jtm-alt-name:hover { text-decoration: underline; }
+            #${CONFIG.trackedModalId} .jtm-alt-price {
+                font-family: ui-monospace, Menlo, monospace; color: #444; min-width: 70px; text-align: right;
+            }
             #${CONFIG.trackedModalId} .jtm-import-wrap {
                 position: absolute; inset: 0; z-index: 5;
                 background: rgba(255,255,255,.98);
@@ -4069,7 +4384,7 @@
             }
         });
         modal.querySelector('.jtm-export').addEventListener('click', () => {
-            const data = JSON.stringify(loadHistory(), null, 2);
+            const data = JSON.stringify(peekHistory(), null, 2);
             copyToClipboard(data).then(() => alert('Tracking data copied to clipboard as JSON.'));
         });
         const importWrap = modal.querySelector('.jtm-import-wrap');
@@ -4123,11 +4438,42 @@
                 );
             }
         });
+        const updateBtn = modal.querySelector('.jtm-update');
+        updateBtn.addEventListener('click', async () => {
+            updateBtn.disabled = true;
+            updateBtn.textContent = 'Updating…';
+            let r;
+            try {
+                r = await refreshProducts(40, (d, t, extra) => {
+                    updateBtn.textContent = extra ? `Updating (${extra})…` : `Updating ${d}/${t}…`;
+                });
+            } finally {
+                updateBtn.disabled = false;
+            }
+            renderTrackedModal(true);
+            updateTrackedBadge();
+            if (!r.total) { alert('No Jumia products to update.'); return; }
+            alert(
+                `Updated ${r.ok} of ${r.total} product(s)` +
+                (r.failed ? `, ${r.failed} could not be read (blocked or removed pages)` : '') +
+                (r.alts ? `; re-checked cheaper alternatives for ${r.alts}` : '') + '. ' +
+                (r.remaining ? `${r.remaining} still outdated — click again to continue. ` : 'Everything is up to date. ') +
+                (r.aliSkipped ? `AliExpress items (${r.aliSkipped}) update when you visit them.` : '')
+            );
+        });
         modal.querySelector('.jtm-body').addEventListener('click', e => {
             const back = e.target.closest('.jtm-back');
             if (back) { detailKey = null; renderTrackedModal(true); return; }
             const hist = e.target.closest('.jtm-hist');
             if (hist) { detailKey = hist.dataset.key; renderTrackedModal(true); return; }
+            const lowBtn = e.target.closest('.jtm-lowtarget');
+            if (lowBtn) {
+                const h = loadHistory();
+                const q = h[lowBtn.dataset.key];
+                const v = Number(lowBtn.dataset.low);
+                if (q && v > 0) { q.target = v; saveHistory(h); resetWatchMeta(lowBtn.dataset.key); renderTrackedModal(true); }
+                return;
+            }
             const target = e.target.closest('.jtm-target');
             if (target) { editTarget(target.dataset.key); return; }
             const del = e.target.closest('.jtm-del');
@@ -4172,7 +4518,7 @@
 
     let detailKey = null;
 
-    function priceChartSvg(samples, code) {
+    function priceChartSvg(samples, code, extra) {
         const pts = (samples || []).filter(s => s && typeof s.p === 'number');
         if (pts.length < 2) return '<div class="jtm-chart-empty">Not enough samples to chart yet.</div>';
         const W = 640, H = 170, PAD = 16;
@@ -4181,11 +4527,21 @@
         if (t1 === t0) t1 = t0 + 1;
         const prices = pts.map(s => s.p);
         const rawLo = Math.min(...prices), rawHi = Math.max(...prices);
-        const padY = Math.max(0.5, (rawHi - rawLo) * 0.12);
-        const lo = rawLo - padY, hi = rawHi + padY;
+        const tgt = extra && typeof extra.target === 'number' && extra.target > 0 ? extra.target : null;
+        const spanLo = tgt != null ? Math.min(rawLo, tgt) : rawLo;
+        const spanHi = tgt != null ? Math.max(rawHi, tgt) : rawHi;
+        const padY = Math.max(0.5, (spanHi - spanLo) * 0.12);
+        const lo = spanLo - padY, hi = spanHi + padY;
         const x = t => PAD + ((t - t0) / (t1 - t0)) * (W - PAD * 2);
         const y = p => H - PAD - ((p - lo) / (hi - lo)) * (H - PAD * 2);
         const points = pts.map(s => `${x(s.t || 0).toFixed(1)},${y(s.p).toFixed(1)}`).join(' ');
+        const refLine = (v, color, label) => {
+            if (typeof v !== 'number' || !isFinite(v) || v <= 0) return '';
+            const yy = y(v).toFixed(1);
+            return `<line x1="${PAD}" y1="${yy}" x2="${W - PAD}" y2="${yy}" stroke="${color}" stroke-width="1" stroke-dasharray="4 3" />` +
+                `<text x="${W - PAD}" y="${(+yy - 3).toFixed(1)}" font-size="10" text-anchor="end" fill="${color}">${escapeHtml(label)} ${escapeHtml(formatMoney(v, code))}</text>`;
+        };
+        const refLines = refLine(extra && extra.avg, '#9a9a9a', 'avg') + refLine(tgt, '#128a3e', '🎯 target');
         const dots = pts.map(s => {
             const lc = !!s.lc;
             return `<circle cx="${x(s.t || 0).toFixed(1)}" cy="${y(s.p).toFixed(1)}" ` +
@@ -4196,6 +4552,7 @@
         }).join('');
         return `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Price history chart">
             <line x1="${PAD}" y1="${H - PAD}" x2="${W - PAD}" y2="${H - PAD}" stroke="#e8ded2" />
+            ${refLines}
             <polyline points="${points}" fill="none" stroke="#ff6a00" stroke-width="1.8"
                 stroke-linejoin="round" stroke-linecap="round" />
             ${dots}
@@ -4239,6 +4596,37 @@
                 <span class="jtm-chg-src" title="Recorded by">${c.src === 'watch' ? 'watch' : 'page'}</span>
             </div>`).join('') : '<div class="jtm-empty">No price changes recorded yet.</div>';
 
+        const deal = analyzeDeal(p);
+        const fm = v => formatMoney(v, code);
+        const dealIcon = { low: '🔥', good: '👍', wait: '⏳', flat: '➖', ok: '⚖️' };
+        const dealBox = deal ? `
+                <div class="jtm-deal ${deal.kind}">
+                    <b>${dealIcon[deal.kind] || ''} ${escapeHtml(deal.text)}</b>
+                    <span>Avg ${fm(deal.avg)} · Low ${fm(deal.low)} · High ${fm(deal.high)} · cheaper than ${deal.cheaperThan}% of recorded prices</span>
+                    ${deal.inflated ? `<div class="jtm-deal-warn">🏷 The \"was\" price (${fm(deal.inflated.op)}) is far above anything recorded (highest seen ${fm(deal.high)}). It claims ${deal.inflated.claimed.toFixed(0)}% off, but the price is ${Math.abs(deal.inflated.real).toFixed(0)}% ${deal.inflated.real >= 0 ? 'below' : 'above'} its average.</div>` : ''}
+                    ${deal.low < deal.cur * 0.995 && targetOf(p) !== deal.low
+                        ? `<button class="jtm-lowtarget" type="button" data-key="${escapeHtml(key)}" data-low="${deal.low}">🎯 Set target to its low (${fm(deal.low)})</button>` : ''}
+                </div>`
+            : '<div class="jtm-deal ok"><span>Deal check appears after a few samples over a couple of days.</span></div>';
+        const altItems = !isAli && p.alts && Array.isArray(p.alts.items) ? p.alts.items : [];
+        const altRows = altItems.map(a => {
+            const saving = cur != null ? cur - a.price : null;
+            const pct = cur > 0 && saving != null ? (saving / cur) * 100 : 0;
+            const cheaper = saving != null && saving > 0;
+            return `<div class="jtm-alt">
+                <a class="jtm-alt-name" href="${escapeHtml(a.url)}" target="_blank" rel="noopener" title="${escapeHtml(a.name)}">${escapeHtml(truncate(a.name, 70))}</a>
+                ${a.similar ? '<span class="jtm-flag listing" title="Same kind of product, different brand/model">similar</span>' : ''}
+                ${a.express ? '<span class="jtm-fship express">⚡ Express</span>' : ''}
+                ${a.abroad ? '<span class="jtm-fship abroad">✈ Abroad</span>' : ''}
+                <span class="jtm-alt-price">${formatMoney(a.price, code)}</span>
+                <span class="jtm-chg-pct ${cheaper ? 'down' : 'up'}">${cheaper ? '−' : '+'}${Math.abs(pct).toFixed(0)}%</span>
+            </div>`;
+        }).join('');
+        const altBlock = isAli ? '' : `
+                <div class="jtm-changes-title">Cheaper &amp; similar listings <span>${
+                    p.alts && p.alts.checkedAt ? `(checked ${timeAgo(p.alts.checkedAt)})` : '(not checked yet)'}</span></div>
+                <div class="jtm-altlist">${altRows || '<div class="jtm-empty">No similar listings found yet.</div>'}</div>`;
+
         const note = p.listingChangedAt
             ? `<div class="jtm-detail-note">⚠ Listing changed ${timeAgo(p.listingChangedAt)} — the seller likely
                 replaced this product (or the price data is implausible). The chart keeps every sample, but the
@@ -4265,13 +4653,20 @@
                     <span><b>High</b>${formatMoney(high, code)}</span>
                     <span><b>Change</b>${change >= 0 ? '+' : ''}${change.toFixed(1)}%</span>
                 </div>
-                <div class="jtm-chart">${priceChartSvg(samples, code)}</div>
-                <div class="jtm-changes-title">Price changes <span>(newest first)</span></div>
+                <div class="jtm-chart">${priceChartSvg(samples, code, { avg: deal ? deal.avg : null, target: targetOf(p) })}</div>
+                ${dealBox}
+                ${altBlock}
+                <div class="jtm-changes-title" style="margin-top:12px">Price changes <span>(newest first)</span></div>
                 <div class="jtm-changes">${chRows}</div>
             </div>`;
     }
 
-    const DASH_SORTS = new Set(['recent', 'changed', 'change-down', 'change-up', 'price-low', 'price-high', 'name']);
+    const DASH_SORTS = new Set(['recent', 'changed', 'change-down', 'change-up', 'price-low', 'price-high', 'deal', 'name']);
+
+    const DASH_FILTERS = new Set(['all', 'down', 'up']);
+    function rememberDashFilter(value) {
+        if (DASH_FILTERS.has(value)) GM_setValue(CONFIG.dashFilterKey, value);
+    }
 
     function rememberDashSort(value) {
         if (DASH_SORTS.has(value)) GM_setValue(CONFIG.dashSortKey, value);
@@ -4286,8 +4681,11 @@
         const savedSort = GM_getValue(CONFIG.dashSortKey, 'recent');
         const rememberedSort = DASH_SORTS.has(savedSort) ? savedSort : 'recent';
         const prevSort = preserve ? (modal.querySelector('.jtm-sort')?.value || rememberedSort) : rememberedSort;
+        const savedFilter = GM_getValue(CONFIG.dashFilterKey, 'all');
+        const rememberedFilter = DASH_FILTERS.has(savedFilter) ? savedFilter : 'all';
+        const prevFilter = preserve ? (modal.querySelector('.jtm-filter')?.value || rememberedFilter) : rememberedFilter;
         const prevScroll = preserve ? body.scrollTop : 0;
-        const history = loadHistory();
+        const history = peekHistory();
         const now = Date.now();
 
         countEl.textContent = `(${Object.keys(history).length})`;
@@ -4315,7 +4713,7 @@
             const listingRecent = !!(p.listingChangedAt &&
                 now - p.listingChangedAt <= CONFIG.watch.changeHighlightMs);
             return {
-                key, p, cur, low, high, change, lastT, moved, listingRecent,
+                key, p, cur, low, high, change, lastT, moved, listingRecent, deal: analyzeDeal(p),
                 recentChange: !!moved && now - moved.t <= CONFIG.watch.changeHighlightMs,
             };
         }).filter(r => r.cur != null).sort((a, b) => b.lastT - a.lastT);
@@ -4328,6 +4726,11 @@
         body.innerHTML = `
             <div class="jtm-toolbar">
                 <input type="search" class="jtm-search" placeholder="Filter by name…" />
+                <select class="jtm-filter" title="Show only products whose price moved since first tracked">
+                    <option value="all">All</option>
+                    <option value="down">↓ Price reduced</option>
+                    <option value="up">↑ Price increased</option>
+                </select>
                 <select class="jtm-sort">
                     <option value="recent">Recent</option>
                     <option value="changed">Recent changes</option>
@@ -4335,6 +4738,7 @@
                     <option value="change-up">Biggest rise</option>
                     <option value="price-low">Lowest price</option>
                     <option value="price-high">Highest price</option>
+                    <option value="deal">Best deals</option>
                     <option value="name">Name</option>
                 </select>
             </div>
@@ -4343,6 +4747,8 @@
         const list = body.querySelector('.jtm-list');
         const search = body.querySelector('.jtm-search');
         const sortSel = body.querySelector('.jtm-sort');
+        const filterSel = body.querySelector('.jtm-filter');
+        filterSel.value = prevFilter;
         search.value = prevSearch;
         sortSel.value = prevSort;
 
@@ -4350,12 +4756,19 @@
             let view = rows.slice();
             const q = search.value.trim().toLowerCase();
             if (q) view = view.filter(r => displayName(r.key, r.p).toLowerCase().includes(q));
+            // Same threshold as the red/green Change column.
+            if (filterSel.value === 'down') view = view.filter(r => r.change < -0.05);
+            else if (filterSel.value === 'up') view = view.filter(r => r.change > 0.05);
             const s = sortSel.value;
             if (s === 'changed') view.sort((a, b) => (b.moved?.t || 0) - (a.moved?.t || 0) || b.lastT - a.lastT);
             else if (s === 'change-down') view.sort((a, b) => a.change - b.change);
             else if (s === 'change-up') view.sort((a, b) => b.change - a.change);
             else if (s === 'price-low') view.sort((a, b) => a.cur - b.cur);
             else if (s === 'price-high') view.sort((a, b) => b.cur - a.cur);
+            else if (s === 'deal') {
+                const score = r => (r.deal ? (r.deal.cur - r.deal.avg) / r.deal.avg : 9);
+                view.sort((a, b) => score(a) - score(b));
+            }
             else if (s === 'name') view.sort((a, b) => displayName(a.key, a.p).localeCompare(displayName(b.key, b.p)));
             if (!view.length) { list.innerHTML = '<div class="jtm-empty">No matches.</div>'; return; }
             list.innerHTML = view.map(r => {
@@ -4383,7 +4796,7 @@
                     const saving = r.cur - altBest.price;
                     const pct = r.cur > 0 ? (saving / r.cur) * 100 : 0;
                     if (saving >= CONFIG.alts.minSavingAmount && pct >= CONFIG.alts.minSavingPercent) {
-                        const altTitle = `Cheaper alternative: ${altBest.name} — ${formatMoney(altBest.price, code)} ` +
+                        const altTitle = `${altBest.similar ? 'Cheaper similar item' : 'Cheaper alternative'}: ${altBest.name} — ${formatMoney(altBest.price, code)} ` +
                             `(save ${formatMoney(saving, code)}${altBest.express ? ', Jumia Express' : ''})`;
                         altFlag = `<a class="jtm-flag alt" href="${escapeHtml(altBest.url)}" target="_blank" ` +
                             `rel="noopener" title="${escapeHtml(altTitle)}">💸 -${pct.toFixed(0)}%</a>`;
@@ -4397,6 +4810,14 @@
                             formatMoney(moved.from, code)} → ${formatMoney(moved.to, code)}">${
                             movedDir === 'down' ? '↓' : '↑'}${Math.abs(moved.pct).toFixed(1)}%</span>`
                         : '';
+                const dl = r.deal;
+                let dealFlags = '';
+                if (dl) {
+                    if (dl.kind === 'low') dealFlags += `<span class="jtm-flag down" title="${escapeHtml(dl.text)}">🔥 low</span>`;
+                    else if (dl.kind === 'good') dealFlags += `<span class="jtm-flag down" title="${escapeHtml(dl.text)}">👍 good</span>`;
+                    else if (dl.kind === 'wait') dealFlags += `<span class="jtm-flag listing" title="${escapeHtml(dl.text)}">⏳ wait</span>`;
+                    if (dl.inflated) dealFlags += `<span class="jtm-flag up" title="The shown &quot;was&quot; price has never been matched by any recorded price. Open the price history for details.">🏷 inflated</span>`;
+                }
                 const rowCls = listing ? ' listing' : moved ? ` changed ${movedDir}` : '';
                 const changeTitle = listing
                     ? `Change measured from ${formatDateTime(r.p.listingChangedAt)}, after the listing changed`
@@ -4413,6 +4834,7 @@
                                 <span class="jtm-tag ${isAli ? 'ali' : ''}">${tag}</span>
                                 ${fulfilFlag}
                                 ${altFlag}
+                                ${dealFlags}
                                 ${movedFlag}
                                 <span class="jtm-name-text">${escapeHtml(truncate(label, 60))}</span>
                             </span>
@@ -4428,7 +4850,15 @@
                     </div>`;
             }).join('');
         }
-        search.addEventListener('input', renderList);
+        let searchTimer = 0;
+        search.addEventListener('input', () => {
+            clearTimeout(searchTimer);
+            searchTimer = setTimeout(renderList, 120);
+        });
+        filterSel.addEventListener('change', () => {
+            rememberDashFilter(filterSel.value);
+            renderList();
+        });
         sortSel.addEventListener('change', () => {
             rememberDashSort(sortSel.value);
             renderList();
@@ -4511,7 +4941,7 @@
     function watchSpaNavigation() {
         let lastUrl = location.href;
         setInterval(() => {
-            if (location.href === lastUrl) return;
+            if (document.hidden || location.href === lastUrl) return;
             lastUrl = location.href;
             log('URL changed →', location.pathname);
 
